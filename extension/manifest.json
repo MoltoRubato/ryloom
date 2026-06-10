@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Ryloom Screen Recorder",
+  "version": "0.1.0",
+  "description": "Record your tab, desktop, or camera with Ryloom. One click opens the Ryloom recorder with the current tab linked as context.",
+  "permissions": ["storage", "activeTab"],
+  "action": {
+    "default_title": "Ryloom Screen Recorder",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "commands": {
+    "start-recording": {
+      "suggested_key": {
+        "default": "Alt+Shift+R"
+      },
+      "description": "Start a Ryloom screen recording for the current tab"
+    }
+  }
+}

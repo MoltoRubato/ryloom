@@ -1,0 +1,67 @@
+{
+  "name": "@ryloom/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ryloom desktop recorder for macOS — record your screen, get a share link instantly.",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "dist": "electron-builder --mac",
+    "dist:all": "electron-builder --mac --x64 --arm64",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.50.0",
+    "@trpc/client": "^11.4.2",
+    "superjson": "^2.2.2",
+    "tus-js-client": "^4.3.1"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.ryloom.desktop",
+    "productName": "Ryloom",
+    "files": [
+      "src/**/*"
+    ],
+    "protocols": [
+      {
+        "name": "Ryloom",
+        "schemes": [
+          "ryloom"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSCameraUsageDescription": "Ryloom uses your camera to show you in a floating bubble on top of your recordings.",
+        "NSMicrophoneUsageDescription": "Ryloom uses your microphone to record narration with your videos.",
+        "NSScreenCaptureUsageDescription": "Ryloom records your screen so you can share it as a video link."
+      }
+    },
+    "dmg": {
+      "title": "Ryloom"
+    }
+  }
+}

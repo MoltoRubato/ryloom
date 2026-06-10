@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src *; font-src 'self'"
+    />
+    <title>Ryloom</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="titlebar">
+      <span class="titlebar-title">Ryloom</span>
+    </div>
+
+    <div id="app">
+      <!-- ============================ LOADING ============================ -->
+      <section class="view view-center" id="view-loading">
+        <div class="loading-stack">
+          <div class="spinner"></div>
+          <span id="loading-label">Connecting to Ryloom…</span>
+        </div>
+      </section>
+
+      <!-- ============================== AUTH ============================= -->
+      <section class="view" id="view-auth" hidden>
+        <div class="auth-top">
+          <button class="icon-btn" id="auth-settings-btn" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+
+        <div class="auth-hero">
+          <svg class="logo" width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#7a76ff" />
+                <stop offset="100%" stop-color="#625DF5" />
+              </linearGradient>
+            </defs>
+            <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#rg)" />
+            <circle cx="32" cy="32" r="13" fill="none" stroke="#fff" stroke-width="3.5" opacity="0.9" />
+            <circle cx="32" cy="32" r="6" fill="#fff" />
+          </svg>
+          <h1>Ryloom</h1>
+          <p>Record your screen. The share link is on your clipboard before the upload finishes.</p>
+        </div>
+
+        <div class="banner banner-error" id="auth-error" hidden></div>
+
+        <div class="auth-stack" id="auth-main">
+          <button class="btn btn-primary btn-lg" id="btn-browser-signin">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+            Sign in with Google
+          </button>
+          <button class="btn btn-ghost btn-block" id="btn-email-mode">Use email instead</button>
+        </div>
+
+        <div class="auth-waiting" id="auth-waiting" hidden>
+          <div class="spinner"></div>
+          <div class="title">Waiting for your browser…</div>
+          <div class="sub">Finish signing in, then click <strong>“Open Ryloom”</strong> when your browser asks.</div>
+          <button class="btn btn-secondary" id="btn-waiting-retry">Reopen browser</button>
+          <button class="btn btn-ghost" id="btn-waiting-cancel">Cancel</button>
+        </div>
+
+        <form class="auth-form" id="auth-email-form" hidden>
+          <div>
+            <label class="label" for="email-input">Email</label>
+            <input class="input" id="email-input" type="email" placeholder="you@company.com" autocomplete="email" required />
+          </div>
+          <div>
+            <label class="label" for="password-input">Password</label>
+            <input class="input" id="password-input" type="password" placeholder="Your password" autocomplete="current-password" required />
+          </div>
+          <button class="btn btn-primary btn-lg" id="btn-email-submit" type="submit">Sign in</button>
+          <button class="btn btn-ghost btn-block" id="btn-email-back" type="button">Back</button>
+        </form>
+
+        <div class="auth-footer" id="auth-footer">Connected to <span id="auth-app-url"></span></div>
+      </section>
+
+      <!-- ============================== HOME ============================= -->
+      <section class="view" id="view-home" hidden>
+        <header class="home-header">
+          <select class="select workspace-select" id="workspace-select" title="Workspace"></select>
+          <div class="avatar" id="avatar" title=""></div>
+          <button class="icon-btn" id="home-settings-btn" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-signout" title="Sign out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+          </button>
+        </header>
+
+        <div class="banner banner-error" id="home-error" hidden></div>
+
+        <div class="card capture-card">
+          <button class="source-btn" id="source-btn" title="Choose what to record">
+            <img class="source-thumb" id="source-thumb" alt="" />
+            <div class="source-meta">
+              <div class="source-name" id="source-name">Entire screen</div>
+              <div class="source-kind" id="source-kind">Screen</div>
+            </div>
+            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+
+          <div class="device-row">
+            <label class="switch" title="Microphone on/off">
+              <input type="checkbox" id="mic-toggle" />
+              <span class="track"></span>
+            </label>
+            <svg class="device-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+            <select class="select" id="mic-select" title="Microphone"></select>
+          </div>
+
+          <div class="device-row">
+            <label class="switch" title="Camera on/off">
+              <input type="checkbox" id="cam-toggle" />
+              <span class="track"></span>
+            </label>
+            <svg class="device-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+            <select class="select" id="cam-select" title="Camera"></select>
+          </div>
+
+          <div class="pref-row">
+            <span>3-2-1 countdown before recording</span>
+            <label class="switch">
+              <input type="checkbox" id="countdown-toggle" />
+              <span class="track"></span>
+            </label>
+          </div>
+        </div>
+
+        <button class="btn btn-record" id="btn-record">
+          <span class="record-dot"></span>
+          Start recording
+        </button>
+        <p class="hint">Your camera bubble floats on top and is captured automatically.</p>
+
+        <div class="home-footer">
+          <button class="link-btn" id="btn-open-library">
+            Open my library
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <!-- =========================== PERMISSION ========================== -->
+      <section class="view" id="view-permission" hidden>
+        <div class="permission-card">
+          <div class="permission-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/></svg>
+          </div>
+          <h2 id="permission-title">Screen Recording permission needed</h2>
+          <p id="permission-body">
+            macOS blocks screen capture until you allow it. Open
+            System Settings → Privacy &amp; Security → Screen Recording, enable
+            Ryloom, then come back here.
+          </p>
+          <div class="permission-actions">
+            <button class="btn btn-primary" id="btn-open-privacy">Open System Settings</button>
+            <button class="btn btn-secondary" id="btn-permission-retry">Try again</button>
+            <button class="btn btn-ghost" id="btn-permission-back">Back</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================== COUNTDOWN =========================== -->
+      <section class="view view-center" id="view-countdown" hidden>
+        <div class="countdown-number" id="countdown-number">3</div>
+        <div class="countdown-sub">Get ready…</div>
+        <button class="btn btn-ghost" id="btn-countdown-cancel" style="margin-top: 26px">Cancel</button>
+      </section>
+
+      <!-- =========================== RECORDING =========================== -->
+      <section class="view" id="view-recording" hidden>
+        <div class="rec-status">
+          <span class="rec-dot" id="rec-dot"></span>
+          <span class="rec-timer" id="rec-timer">00:00</span>
+        </div>
+        <div class="rec-state-label" id="rec-state-label">Recording</div>
+        <div class="rec-source-label" id="rec-source-label"></div>
+        <div class="rec-actions">
+          <button class="btn btn-primary btn-lg" id="btn-stop">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            Stop &amp; get link
+          </button>
+          <button class="btn btn-secondary" id="btn-pause">Pause</button>
+          <button class="btn btn-ghost danger" id="btn-cancel-rec">Cancel recording</button>
+        </div>
+        <p class="hint">The link will be on your clipboard the moment you stop.</p>
+      </section>
+
+      <!-- =========================== UPLOADING =========================== -->
+      <section class="view" id="view-uploading" hidden>
+        <div class="result-head">
+          <div class="spinner" style="width: 30px; height: 30px"></div>
+          <h2 id="upload-title">Uploading…</h2>
+          <p>Link copied — share it now, the video will be ready shortly.</p>
+        </div>
+
+        <div class="link-chip">
+          <span class="url" id="upload-link"></span>
+          <button class="icon-btn" id="btn-upload-copy" title="Copy link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          </button>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+          <div class="progress-meta">
+            <span id="progress-pct">0%</span>
+            <span id="progress-bytes"></span>
+          </div>
+        </div>
+
+        <div class="banner banner-error" id="upload-error" hidden></div>
+        <div class="result-actions" id="upload-error-actions" hidden>
+          <button class="btn btn-primary" id="btn-upload-retry">Retry upload</button>
+          <button class="btn btn-secondary" id="btn-upload-save">Save file…</button>
+        </div>
+      </section>
+
+      <!-- ============================== DONE ============================= -->
+      <section class="view" id="view-done" hidden>
+        <div class="result-head">
+          <div class="result-icon success">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </div>
+          <h2>Uploaded — link on your clipboard</h2>
+          <p>Your video is processing and will be ready to watch in a moment.</p>
+        </div>
+
+        <div class="link-chip">
+          <span class="url" id="done-link"></span>
+        </div>
+
+        <div class="result-actions">
+          <button class="btn btn-primary btn-lg" id="btn-open-video">Open video</button>
+          <button class="btn btn-secondary" id="btn-copy-again">Copy link again</button>
+          <button class="btn btn-ghost" id="btn-new-recording">New recording</button>
+        </div>
+        <div class="result-secondary">
+          <button class="link-btn" id="btn-done-save">Save a local copy…</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- ======================== SETTINGS OVERLAY ======================== -->
+    <div class="overlay" id="settings-overlay" hidden>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Settings</h2>
+          <button class="icon-btn" id="btn-settings-close" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div class="panel-body">
+          <div>
+            <label class="label" for="setting-app-url">App URL</label>
+            <input class="input" id="setting-app-url" type="url" placeholder="https://ryloom.example.com" spellcheck="false" />
+            <div class="field-hint">
+              Point this at your Ryloom instance (self-hosted or cloud). The app
+              fetches its Supabase connection from
+              <code>/api/desktop-config</code> on this host.
+            </div>
+          </div>
+          <div class="config-status" id="config-status">Not connected yet</div>
+          <button class="btn btn-primary btn-block" id="btn-save-settings">Save &amp; reconnect</button>
+          <div class="panel-footer-note" id="settings-version">Ryloom Desktop</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====================== SOURCE PICKER OVERLAY ===================== -->
+    <div class="overlay" id="sources-overlay" hidden>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Choose what to record</h2>
+          <div class="panel-header-actions">
+            <button class="icon-btn" id="btn-sources-refresh" title="Refresh">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            </button>
+            <button class="icon-btn" id="btn-sources-close" title="Close">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div>
+            <div class="sources-section-title">Screens</div>
+            <div class="sources-grid" id="sources-grid-screens"></div>
+          </div>
+          <div>
+            <div class="sources-section-title">Windows</div>
+            <div class="sources-grid" id="sources-grid-windows"></div>
+            <div class="sources-empty" id="sources-empty" hidden>No capturable windows found.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast-root"></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

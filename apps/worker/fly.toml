@@ -1,0 +1,29 @@
+# Fly.io config for the Ryloom worker — a pure background service (no HTTP).
+# Deploy from the MONOREPO ROOT so the Docker build context includes
+# packages/db:
+#   fly deploy . --config apps/worker/fly.toml
+#
+# Secrets (fly secrets set ...):
+#   WORKER_DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY
+
+app = "ryloom-worker"
+primary_region = "syd"
+kill_signal = "SIGTERM"
+kill_timeout = "300s" # let in-flight FFmpeg jobs finish
+
+[build]
+  dockerfile = "apps/worker/Dockerfile"
+
+[env]
+  WORKER_CONCURRENCY = "2"
+  AI_MODEL = "gpt-4o-mini"
+
+# No [[services]] / [http_service] section on purpose — the worker only
+# polls Postgres and talks to Supabase Storage.
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"
+
+[[restart]]
+  policy = "always"

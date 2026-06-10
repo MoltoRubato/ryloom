@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; img-src 'self' data:"
+    />
+    <title>Ryloom camera</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+          Helvetica, Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+
+      /* The whole window drags the bubble around the screen. */
+      body {
+        -webkit-app-region: drag;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .bubble {
+        position: relative;
+        width: calc(100% - 8px);
+        height: calc(100% - 8px);
+        border-radius: 50%;
+        overflow: hidden;
+        border: 3px solid rgba(255, 255, 255, 0.85);
+        background: #17151f;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+      }
+
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        /* Mirror like a real selfie camera. */
+        transform: scaleX(-1);
+        background: #17151f;
+      }
+
+      .error {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        color: #9b97ad;
+        font-size: 11px;
+        padding: 18px;
+        background: #221f2e;
+      }
+
+      .error.visible {
+        display: flex;
+      }
+
+      /* Hover controls — kept out of the drag region. */
+      .controls {
+        position: absolute;
+        left: 50%;
+        bottom: 12%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 4px;
+        padding: 4px;
+        border-radius: 999px;
+        background: rgba(13, 12, 19, 0.78);
+        backdrop-filter: blur(6px);
+        opacity: 0;
+        transition: opacity 0.18s ease;
+        -webkit-app-region: no-drag;
+        z-index: 2;
+      }
+
+      .bubble:hover .controls {
+        opacity: 1;
+      }
+
+      .controls button {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: rgba(255, 255, 255, 0.85);
+        font-family: inherit;
+        font-size: 10.5px;
+        font-weight: 700;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.12s ease;
+      }
+
+      .controls button:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      .controls button.active {
+        background: #625df5;
+        color: #fff;
+      }
+
+      .controls button.close:hover {
+        background: rgba(242, 92, 92, 0.85);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bubble">
+      <video id="cam" autoplay playsinline muted></video>
+      <div class="error" id="error">Camera unavailable</div>
+      <div class="controls">
+        <button id="size-s" title="Small">S</button>
+        <button id="size-m" title="Medium">M</button>
+        <button id="size-l" title="Large">L</button>
+        <button id="close" class="close" title="Hide camera">✕</button>
+      </div>
+    </div>
+
+    <script>
+      const { ipcRenderer } = require("electron");
+
+      const SIZES = { s: 160, m: 220, l: 320 };
+      const params = new URLSearchParams(window.location.search);
+      const deviceId = params.get("deviceId") || "";
+
+      const video = document.getElementById("cam");
+      const errorEl = document.getElementById("error");
+      let stream = null;
+
+      async function startCamera() {
+        const constraints = deviceId
+          ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } }
+          : { video: { width: { ideal: 1280 }, height: { ideal: 720 } } };
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+          if (deviceId) {
+            // Chosen camera may be gone — fall back to the default one.
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            } catch {
+              errorEl.classList.add("visible");
+              return;
+            }
+          } else {
+            errorEl.classList.add("visible");
+            return;
+          }
+        }
+        errorEl.classList.remove("visible");
+        video.srcObject = stream;
+      }
+
+      function markActiveSize(activeId) {
+        for (const id of ["size-s", "size-m", "size-l"]) {
+          document.getElementById(id).classList.toggle("active", id === activeId);
+        }
+      }
+
+      function wireSize(id, size) {
+        document.getElementById(id).addEventListener("click", () => {
+          ipcRenderer.invoke("bubble-set-size", size);
+          markActiveSize(id);
+        });
+      }
+
+      wireSize("size-s", SIZES.s);
+      wireSize("size-m", SIZES.m);
+      wireSize("size-l", SIZES.l);
+
+      // Highlight whichever preset matches the current window size.
+      const current = window.innerWidth;
+      markActiveSize(
+        current <= (SIZES.s + SIZES.m) / 2
+          ? "size-s"
+          : current >= (SIZES.m + SIZES.l) / 2
+            ? "size-l"
+            : "size-m",
+      );
+
+      document.getElementById("close").addEventListener("click", () => {
+        if (stream) for (const track of stream.getTracks()) track.stop();
+        ipcRenderer.invoke("bubble-close");
+      });
+
+      window.addEventListener("beforeunload", () => {
+        if (stream) for (const track of stream.getTracks()) track.stop();
+      });
+
+      startCamera();
+    </script>
+  </body>
+</html>

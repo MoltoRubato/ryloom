@@ -1,0 +1,20 @@
+{
+  "name": "ryloom",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Ryloom — open-source async video messaging (Loom-class): record, share, analyze, with AI workflows.",
+  "scripts": {
+    "dev": "pnpm --filter @ryloom/web dev",
+    "dev:worker": "pnpm --filter @ryloom/worker dev",
+    "build": "pnpm --filter @ryloom/db build && pnpm --filter @ryloom/web build",
+    "build:worker": "pnpm --filter @ryloom/worker build",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @ryloom/db db:generate",
+    "db:migrate": "pnpm --filter @ryloom/db db:migrate",
+    "db:push": "pnpm --filter @ryloom/db db:push"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

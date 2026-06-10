@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ryloom Screen Recorder</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="#625DF5" />
+          <circle cx="16" cy="16" r="8.5" fill="none" stroke="#fff" stroke-width="2.5" />
+          <path d="M14 12.5l5.5 3.5-5.5 3.5z" fill="#fff" />
+        </svg>
+      </span>
+      <div class="header-text">
+        <span class="brand">Ryloom</span>
+        <span class="tab-title" id="tab-title">Loading current tab&hellip;</span>
+      </div>
+    </header>
+
+    <main class="actions">
+      <button type="button" class="action action-primary" id="record-tab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 7.75a.75.75 0 0 1 1.142-.638l3.664 2.249a.75.75 0 0 1 0 1.278l-3.664 2.25a.75.75 0 0 1-1.142-.64z" />
+          <path d="M12 17v4" />
+          <path d="M8 21h8" />
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+        </svg>
+        <span>Record this tab</span>
+      </button>
+
+      <button type="button" class="action" id="record-desktop">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13 3H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-3" />
+          <path d="M8 21h8" />
+          <path d="M12 17v4" />
+          <path d="m17 8 5-5" />
+          <path d="M17 3h5v5" />
+        </svg>
+        <span>Record desktop</span>
+      </button>
+
+      <button type="button" class="action" id="record-camera">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" />
+          <rect x="2" y="6" width="14" height="12" rx="2" />
+        </svg>
+        <span>Record camera</span>
+      </button>
+
+      <p class="shortcut-hint" id="shortcut-hint" hidden>
+        Quick start: <kbd id="shortcut-key"></kbd>
+      </p>
+    </main>
+
+    <footer class="footer">
+      <button type="button" class="footer-link" id="open-library">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m16 6 4 14" />
+          <path d="M12 6v14" />
+          <path d="M8 8v12" />
+          <path d="M4 4v16" />
+        </svg>
+        <span>Open library</span>
+      </button>
+      <button type="button" class="icon-button" id="open-options" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
