@@ -404,19 +404,24 @@ export async function hlsLadder(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Audio extraction (for Whisper)
+// Audio extraction (for Whisper / Gemini)
 // ---------------------------------------------------------------------------
 
-/** Extracts compressed mono 16kHz AAC audio; supports -ss/-t chunking. */
+/**
+ * Extracts compressed mono 16kHz 32k audio; supports -ss/-t chunking.
+ * Defaults to AAC (Whisper m4a path); "mp3" produces libmp3lame output for
+ * the Gemini Files API (which accepts audio/mp3).
+ */
 export async function extractAudio(
   input: string,
   output: string,
-  opts: { offsetSec?: number; durationSec?: number } = {},
+  opts: { offsetSec?: number; durationSec?: number; format?: "aac" | "mp3" } = {},
 ): Promise<void> {
   const args: string[] = [];
   if (opts.offsetSec !== undefined) args.push("-ss", opts.offsetSec.toFixed(3));
   if (opts.durationSec !== undefined) args.push("-t", opts.durationSec.toFixed(3));
-  args.push("-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k", output);
+  const codec = opts.format === "mp3" ? "libmp3lame" : "aac";
+  args.push("-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", codec, "-b:a", "32k", output);
   await ffmpeg(args);
 }
 

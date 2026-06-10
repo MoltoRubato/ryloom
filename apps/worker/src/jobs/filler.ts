@@ -1,6 +1,6 @@
 import { asc, eq } from "drizzle-orm";
 
-import { transcriptSegments, type TranscriptWord } from "@ryloom/db";
+import { notifications, transcriptSegments, type TranscriptWord } from "@ryloom/db";
 
 import { db } from "../db";
 import { type MsRange } from "../ffmpeg";
@@ -46,8 +46,21 @@ export async function runFillerRemovalJob(
 
   const words: TranscriptWord[] = segments.flatMap((s) => s.words ?? []);
   if (words.length === 0) {
+    // Gemini transcripts have no word-level timestamps — skip gracefully
+    // instead of failing, and tell the owner why nothing changed.
+    const reason =
+      "word-level timestamps unavailable (transcribe with an OpenAI key for precise filler removal)";
     await restoreVideoReady(video.id);
-    return { fillersRemoved: 0, reason: "no_word_timestamps" };
+    await db.insert(notifications).values({
+      userId: video.ownerId,
+      type: "system",
+      workspaceId: video.workspaceId,
+      videoId: video.id,
+      title: "Filler-word removal unavailable",
+      body: `"${video.title}" was left unchanged: ${reason}.`,
+      data: { jobId: job.id, jobType: job.type },
+    });
+    return { skipped: true, reason };
   }
 
   const durationMs = video.durationMs ?? 0;

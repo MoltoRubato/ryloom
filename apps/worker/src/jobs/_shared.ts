@@ -258,7 +258,7 @@ export async function reRenderWithKeepRanges(params: {
 
   // Re-transcribe if a ready transcript existed — its timings are now stale.
   const existingTranscript = await findReadyTranscript(video.id);
-  if (existingTranscript && env.OPENAI_API_KEY) {
+  if (existingTranscript && env.transcribeProvider) {
     await enqueueJob({
       videoId: video.id,
       workspaceId: video.workspaceId,

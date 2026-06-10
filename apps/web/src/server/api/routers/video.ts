@@ -17,6 +17,7 @@ import {
 
 import { createPlaybackToken } from "@/lib/playback-token";
 import { BUCKETS, createSignedUrl, deletePrefix } from "@/lib/storage";
+import { wakeWorker } from "@/lib/wake-worker";
 import {
   ADMIN_ROLES,
   CREATOR_ROLES,
@@ -70,6 +71,7 @@ async function enqueueJob(
     inputJson: job.input ?? {},
     priority: job.priority ?? 0,
   });
+  wakeWorker();
 }
 
 /** Effective share settings: a share-link row overrides the video defaults. */

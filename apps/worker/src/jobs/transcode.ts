@@ -215,7 +215,7 @@ export async function processVideoFile(params: {
     });
   }
 
-  if (params.chainTranscribe && env.OPENAI_API_KEY) {
+  if (params.chainTranscribe && env.transcribeProvider) {
     await enqueueJob({
       videoId: video.id,
       workspaceId: video.workspaceId,

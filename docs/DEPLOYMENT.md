@@ -137,7 +137,8 @@ Authentication → **URL Configuration**:
    | `IP_HASH_SALT` | any long random string (`openssl rand -hex 24`) |
    | `RESEND_API_KEY` | *(optional)* for invite/comment emails |
    | `EMAIL_FROM` | *(optional)* e.g. `Ryloom <ryloom@lyratechnologies.com.au>` |
-   | `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` | *(add later, step 5)* |
+   | `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` | *(add later, step 4)* |
+   | `WORKER_WAKE_URL` / `WORKER_WAKE_TOKEN` | *(optional, from step 3 if using Modal)* |
 
 4. **Deploy.** When it's live:
    - go back to Supabase → Authentication → URL Configuration and set **Site
@@ -154,40 +155,83 @@ expected; continue.
 
 ## Step 3 — Worker (10 min)
 
-The worker is a long-running Docker container with FFmpeg. It polls the
-database for jobs — no inbound networking, no public URL needed.
+The worker runs FFmpeg + AI jobs from the database queue — no inbound
+networking required. It supports two modes:
 
-Environment variables (same for every host):
+- **Continuous** (default): runs 24/7 and polls — for Railway/Fly/any Docker box.
+- **Drain** (`WORKER_DRAIN=true`): wakes up, processes everything queued, exits —
+  built for **Modal's** scale-to-zero free tier.
+
+### Pick an AI key first (either one)
+
+| Key | Where to get it | What you get |
+|---|---|---|
+| `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — **free tier** | Transcription + all AI features. Word timing is approximate, so filler-word removal is best-effort. |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) — pay-as-you-go | Whisper transcription with word-level timestamps → precise filler-word removal. |
+
+Set one (or both — OpenAI wins for transcription when both are present).
+Without either, videos still process fully; only transcripts/AI features no-op.
+
+Common environment variables:
 
 | Name | Value |
 |---|---|
 | `WORKER_DATABASE_URL` | direct string, port **5432** |
 | `SUPABASE_URL` | same as `NEXT_PUBLIC_SUPABASE_URL` |
 | `SUPABASE_SERVICE_ROLE_KEY` | from step 1.3 |
-| `OPENAI_API_KEY` | your OpenAI key (transcription + AI) |
-| `AI_MODEL` | `gpt-4o-mini` (default; any chat model id works) |
+| `GEMINI_API_KEY` *or* `OPENAI_API_KEY` | see table above |
+| `AI_MODEL` | optional (defaults: `gemini-2.5-flash` / `gpt-4o-mini`) |
 | `WORKER_CONCURRENCY` | `2` (raise on bigger machines) |
 
-### Option A — Railway (easiest)
+### Option A — Modal (free tier, recommended on no budget)
+
+Modal's Starter plan includes ~$30/month of compute, billed per second with
+scale-to-zero — the drain-mode worker typically uses cents per recorded hour.
+
+```bash
+pip install modal
+modal setup                      # one-time browser auth
+
+# Secrets (one secret bundle named exactly "ryloom-worker"):
+modal secret create ryloom-worker \
+  WORKER_DATABASE_URL='postgresql://...:5432/postgres' \
+  SUPABASE_URL='https://YOUR-PROJECT.supabase.co' \
+  SUPABASE_SERVICE_ROLE_KEY='eyJ...' \
+  GEMINI_API_KEY='AIza...' \
+  WAKE_TOKEN='any-random-string'
+
+# Deploy (from the repo root):
+modal deploy apps/worker/modal_app.py
+```
+
+The deploy prints a **wake endpoint URL**. Two things happen now:
+
+1. A scheduled function checks the queue **every minute** and drains it —
+   recordings process within ~1 minute even with no further setup.
+2. For instant pickup, copy the wake URL into Vercel as `WORKER_WAKE_URL`
+   (and your `WAKE_TOKEN` value as `WORKER_WAKE_TOKEN`), then redeploy the web
+   app — it pings Modal the moment a job is enqueued.
+
+**Verify:** `modal app logs ryloom-worker` while you record a test clip.
+
+### Option B — Railway
 
 1. [railway.app](https://railway.app) → New Project → **Deploy from GitHub repo**.
-2. In the service settings → *Build* → set **Dockerfile Path** =
-   `apps/worker/Dockerfile` (root directory stays the repo root).
-3. Add the env vars above → Deploy.
-4. Logs should show `worker ready (concurrency 2), polling for jobs…`
+2. Service settings → *Build* → **Dockerfile Path** = `apps/worker/Dockerfile`.
+3. Add the env vars above → Deploy. (~$5/mo with usage-based pricing.)
 
-### Option B — Fly.io
+### Option C — Fly.io
 
 ```bash
 fly launch --no-deploy --copy-config --config apps/worker/fly.toml
 fly secrets set WORKER_DATABASE_URL='...' SUPABASE_URL='...' \
-  SUPABASE_SERVICE_ROLE_KEY='...' OPENAI_API_KEY='...'
+  SUPABASE_SERVICE_ROLE_KEY='...' GEMINI_API_KEY='...'
 fly deploy --dockerfile apps/worker/Dockerfile
 ```
 
 Use a `shared-cpu-2x` / 2GB+ machine for 1080p; bigger for 4K/HLS-heavy loads.
 
-### Option C — any Docker box
+### Option D — any Docker box
 
 ```bash
 docker build -f apps/worker/Dockerfile -t ryloom-worker .
@@ -264,17 +308,23 @@ the current tab pre-filled.
 | Google sign-in error `redirect_uri_mismatch` | The redirect URI in Google Cloud must be exactly `https://<PROJECT_REF>.supabase.co/auth/v1/callback`. |
 | After sign-in, redirected to localhost | Supabase → Auth → URL Configuration → Site URL is still localhost. |
 | Upload fails immediately | Storage buckets missing → re-run `supabase db push`; or file exceeds the bucket's 10 GB cap. |
-| Stuck on "Processing…" forever | Worker not running / can't reach DB. Check worker logs; `WORKER_DATABASE_URL` must be the **direct** (5432) string. |
-| Transcript/AI missing | `OPENAI_API_KEY` not set on the worker (videos still work; AI features no-op). |
+| Stuck on "Processing…" forever | Worker not running / can't reach DB. Check worker logs (`modal app logs ryloom-worker` on Modal); `WORKER_DATABASE_URL` must be the **direct** (5432) string. |
+| Transcript/AI missing | Neither `GEMINI_API_KEY` nor `OPENAI_API_KEY` set on the worker (videos still work; AI features no-op). |
+| Filler-word removal says "unavailable" | Transcription ran via Gemini (no word-level timestamps). Use an OpenAI key for Whisper if you need precise filler edits. |
 | Desktop app: black recording | macOS Screen Recording permission not granted — System Settings → Privacy & Security → Screen Recording → enable Ryloom → relaunch. |
 | Desktop app won't open ("unidentified developer") | Unsigned build: right-click the app → Open → Open. |
 | Emails not sending | `RESEND_API_KEY`/`EMAIL_FROM` unset — invites still work via copyable links. |
 
 ## Cost notes
 
-- **Supabase Free** caps storage at 1 GB (≈15–30 min of HD video) — fine for a
-  trial; **Pro ($25/mo)** gives 100 GB and removes the 50 MB upload cap.
+Running on $0 is viable for a trial: **Vercel Hobby** (free) + **Supabase Free**
++ **Modal Starter** (~$30/mo included compute) + **Gemini free tier**.
+
+- **Supabase Free** caps storage at 1 GB (≈15–30 min of HD video) and uploads
+  at 50 MB — the first thing you'll outgrow; **Pro ($25/mo)** gives 100 GB.
 - **Vercel Hobby** works; Pro if you want team members on the dashboard.
-- **Worker**: ~$5–10/mo on Railway/Fly at light usage.
-- **OpenAI**: Whisper ≈ $0.006/min of video; summaries/chapters are fractions
-  of a cent with `gpt-4o-mini`.
+- **Worker**: free on Modal's included credits at small-team volume
+  (per-second billing, scale-to-zero); or ~$5–10/mo continuous on Railway/Fly.
+- **AI**: Gemini AI Studio free tier covers transcription + summaries for a
+  small team (daily request caps apply). OpenAI alternative: Whisper ≈
+  $0.006/min of video; `gpt-4o-mini` summaries are fractions of a cent.

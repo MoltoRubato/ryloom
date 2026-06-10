@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { aiOutputs, processingJobs, transcripts, videos, workspaceUsage } from "@ryloom/db";
 
+import { wakeWorker } from "@/lib/wake-worker";
 import {
   ADMIN_ROLES,
   createTRPCRouter,
@@ -163,6 +164,7 @@ export const aiRouter = createTRPCRouter({
         priority: membership.plan.priorityProcessing ? 10 : 0,
         inputJson: { aiOutputId: output.id, outputType: input.type },
       });
+      wakeWorker();
 
       await ctx.db
         .insert(workspaceUsage)

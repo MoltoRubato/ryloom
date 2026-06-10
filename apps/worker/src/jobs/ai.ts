@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import { and, asc, desc, eq, sql } from "drizzle-orm";
-import OpenAI from "openai";
 import { z } from "zod";
 
 import {
@@ -16,6 +15,7 @@ import {
 
 import { db } from "../db";
 import { env } from "../env";
+import { chatJson, chatText } from "../providers/llm";
 import { type ClaimedJob } from "../queue";
 import { getVideoOrThrow } from "./_shared";
 
@@ -162,9 +162,11 @@ export async function runAiGenerateJob(job: ClaimedJob): Promise<Record<string, 
       .where(eq(aiOutputs.id, output.id));
   };
 
-  if (!env.OPENAI_API_KEY) {
-    await markFailed("No OPENAI_API_KEY configured — AI generation is disabled");
-    return { aiOutputId: output.id, status: "failed", reason: "no_openai_key" };
+  if (!env.llmProvider) {
+    await markFailed(
+      "No OPENAI_API_KEY or GEMINI_API_KEY configured — AI generation is disabled",
+    );
+    return { aiOutputId: output.id, status: "failed", reason: "no_ai_key" };
   }
 
   const def = PROMPTS[output.type];
@@ -211,25 +213,12 @@ export async function runAiGenerateJob(job: ClaimedJob): Promise<Record<string, 
       .filter(Boolean)
       .join("\n");
 
-    const client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
-    const completion = await client.chat.completions.create({
-      model: env.AI_MODEL,
-      temperature: 0.4,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userMessage },
-      ],
-      ...(def.json ? { response_format: { type: "json_object" as const } } : {}),
-    });
-    const content = completion.choices[0]?.message?.content?.trim();
-    if (!content) throw new Error("AI model returned an empty response");
-
     let contentText: string | null = null;
     let contentJson: Record<string, unknown> | null = null;
     let chapters: VideoChapter[] | null = null;
 
     if (def.json) {
-      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const parsed = await chatJson({ system: SYSTEM_PROMPT, user: userMessage });
       if (output.type === "chapters") {
         const validated = chaptersSchema.parse(parsed);
         const maxMs = video.durationMs ?? Number.MAX_SAFE_INTEGER;
@@ -246,6 +235,7 @@ export async function runAiGenerateJob(job: ClaimedJob): Promise<Record<string, 
         contentJson = parsed;
       }
     } else {
+      const content = await chatText({ system: SYSTEM_PROMPT, user: userMessage });
       // Strip wrapping quotes/code fences models occasionally add.
       contentText = content
         .replace(/^```[a-z]*\n?/i, "")

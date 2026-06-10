@@ -6,6 +6,7 @@ import { processingJobs, recordingSessions, videos } from "@ryloom/db";
 
 import { env } from "@/env";
 import { BUCKETS, storagePaths } from "@/lib/storage";
+import { wakeWorker } from "@/lib/wake-worker";
 import {
   CREATOR_ROLES,
   createTRPCRouter,
@@ -198,6 +199,7 @@ export const recordingRouter = createTRPCRouter({
             autoAi: plan.aiGenerationsPerMonth === null || (plan.aiGenerationsPerMonth ?? 0) > 0,
           },
         });
+        wakeWorker();
       }
 
       return { videoId: session.videoId };

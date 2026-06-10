@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, or, sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import { processingJobs } from "@ryloom/db";
@@ -107,6 +107,12 @@ function waitForWakeOrTimeout(ms: number): Promise<void> {
 // Worker slots
 // ---------------------------------------------------------------------------
 
+// Drain-mode bookkeeping: how many slots are busy, when work was last seen,
+// and how many jobs this process has handled.
+let activeSlots = 0;
+let lastActivityAt = Date.now();
+let jobsProcessed = 0;
+
 async function slotLoop(slot: number): Promise<void> {
   log(`slot ${slot} started`);
   while (!shuttingDown) {
@@ -119,7 +125,15 @@ async function slotLoop(slot: number): Promise<void> {
       continue;
     }
     if (job) {
-      await processJob(job);
+      lastActivityAt = Date.now();
+      activeSlots += 1;
+      try {
+        await processJob(job);
+        jobsProcessed += 1;
+      } finally {
+        activeSlots -= 1;
+        lastActivityAt = Date.now();
+      }
       continue; // immediately look for the next job
     }
     await waitForWakeOrTimeout(IDLE_POLL_MS);
@@ -131,17 +145,26 @@ async function slotLoop(slot: number): Promise<void> {
 // Retention self-scheduling
 // ---------------------------------------------------------------------------
 
-async function ensureRetentionSweepQueued(): Promise<void> {
+/**
+ * Enqueues a retention_sweep when none is pending. With `onlyIfDue` (drain
+ * mode — short-lived processes booting every minute) a sweep that completed
+ * within the last interval also counts, so we don't sweep on every boot.
+ */
+async function ensureRetentionSweepQueued(onlyIfDue = false): Promise<void> {
   try {
+    const pending = and(
+      eq(processingJobs.type, "retention_sweep"),
+      inArray(processingJobs.status, ["queued", "running"]),
+    );
+    const recentlyCompleted = and(
+      eq(processingJobs.type, "retention_sweep"),
+      eq(processingJobs.status, "completed"),
+      gt(processingJobs.completedAt, new Date(Date.now() - RETENTION_INTERVAL_MS)),
+    );
     const [row] = await db
       .select({ count: sql<number>`count(*)` })
       .from(processingJobs)
-      .where(
-        and(
-          eq(processingJobs.type, "retention_sweep"),
-          inArray(processingJobs.status, ["queued", "running"]),
-        ),
-      );
+      .where(onlyIfDue ? or(pending, recentlyCompleted) : pending);
     if (Number(row?.count ?? 0) === 0) {
       await db.insert(processingJobs).values({ type: "retention_sweep", inputJson: {} });
       log("enqueued retention_sweep");
@@ -157,31 +180,44 @@ async function ensureRetentionSweepQueued(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  const startedAt = Date.now();
   await fs.mkdir(env.TMP_DIR, { recursive: true });
   log(
-    `starting — concurrency=${env.WORKER_CONCURRENCY}, tmp=${env.TMP_DIR}, ` +
-      `ai=${env.OPENAI_API_KEY ? env.AI_MODEL : "disabled (no OPENAI_API_KEY)"}`,
+    `starting — mode=${env.WORKER_DRAIN ? "drain" : "continuous"}, ` +
+      `concurrency=${env.WORKER_CONCURRENCY}, tmp=${env.TMP_DIR}, ` +
+      `ai=${
+        env.llmProvider
+          ? `${env.llmProvider}:${env.AI_MODEL}`
+          : "disabled (no OPENAI_API_KEY or GEMINI_API_KEY)"
+      }`,
   );
 
   // Dedicated connection for LISTEN — pg_notify('ryloom_jobs', job_id) fires
   // on every processing_jobs insert (see supabase migrations). Polling every
-  // 3s remains the fallback if the listener can't connect.
-  const listener = postgres(env.DATABASE_URL, {
-    max: 1,
-    prepare: false,
-    onnotice: () => undefined,
-  });
-  try {
-    await listener.listen("ryloom_jobs", () => wake());
-    log("listening on channel ryloom_jobs");
-  } catch (error) {
-    log(`LISTEN unavailable (${String(error)}) — relying on ${IDLE_POLL_MS}ms polling`);
+  // 3s remains the fallback if the listener can't connect. Drain mode skips
+  // LISTEN entirely: the process is short-lived and polls until it exits.
+  let listener: ReturnType<typeof postgres> | null = null;
+  if (!env.WORKER_DRAIN) {
+    listener = postgres(env.DATABASE_URL, {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    try {
+      await listener.listen("ryloom_jobs", () => wake());
+      log("listening on channel ryloom_jobs");
+    } catch (error) {
+      log(`LISTEN unavailable (${String(error)}) — relying on ${IDLE_POLL_MS}ms polling`);
+    }
   }
 
-  await ensureRetentionSweepQueued();
-  const retentionTimer = setInterval(() => {
-    void ensureRetentionSweepQueued();
-  }, RETENTION_INTERVAL_MS);
+  await ensureRetentionSweepQueued(env.WORKER_DRAIN);
+  let retentionTimer: NodeJS.Timeout | null = null;
+  if (!env.WORKER_DRAIN) {
+    retentionTimer = setInterval(() => {
+      void ensureRetentionSweepQueued();
+    }, RETENTION_INTERVAL_MS);
+  }
 
   const slots: Promise<void>[] = [];
   for (let i = 0; i < env.WORKER_CONCURRENCY; i++) {
@@ -192,13 +228,15 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`${signal} received — finishing in-flight jobs, claiming no new work`);
-    clearInterval(retentionTimer);
+    if (retentionTimer) clearInterval(retentionTimer);
     wake();
     await Promise.allSettled(slots);
-    try {
-      await listener.end({ timeout: 5 });
-    } catch {
-      // already closed
+    if (listener) {
+      try {
+        await listener.end({ timeout: 5 });
+      } catch {
+        // already closed
+      }
     }
     try {
       await db.$client.end({ timeout: 5 });
@@ -211,6 +249,30 @@ async function main(): Promise<void> {
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+
+  if (env.WORKER_DRAIN) {
+    // Drain supervisor: once every slot is idle and nothing has been claimable
+    // for DRAIN_IDLE_EXIT_SECONDS, stop the slots and exit cleanly.
+    const idleExitMs = env.DRAIN_IDLE_EXIT_SECONDS * 1000;
+    while (!shuttingDown) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      if (activeSlots === 0 && Date.now() - lastActivityAt >= idleExitMs) {
+        shuttingDown = true;
+        wake();
+      }
+    }
+    await Promise.allSettled(slots);
+    try {
+      await db.$client.end({ timeout: 5 });
+    } catch {
+      // already closed
+    }
+    log(
+      `drain complete — ${jobsProcessed} job(s) processed in ` +
+        `${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+    );
+    process.exit(0);
+  }
 
   await Promise.all(slots);
 }

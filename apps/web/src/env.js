@@ -17,6 +17,11 @@ export const env = createEnv({
       .string()
       .optional()
       .transform((v) => v === "true"),
+    // Optional: serverless-worker wake-up webhook (e.g. the Modal endpoint).
+    // When set, the app pings it after enqueueing a processing job so a
+    // scale-to-zero worker starts immediately instead of on its next tick.
+    WORKER_WAKE_URL: z.string().url().optional(),
+    WORKER_WAKE_TOKEN: z.string().optional(),
   },
   client: {
     NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
@@ -40,6 +45,8 @@ export const env = createEnv({
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     EMAIL_FROM: process.env.EMAIL_FROM,
     SCIM_ENABLED: process.env.SCIM_ENABLED,
+    WORKER_WAKE_URL: process.env.WORKER_WAKE_URL,
+    WORKER_WAKE_TOKEN: process.env.WORKER_WAKE_TOKEN,
     NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
