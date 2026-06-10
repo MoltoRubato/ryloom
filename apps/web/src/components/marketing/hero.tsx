@@ -49,7 +49,7 @@ export function Hero() {
               </Button>
             </div>
             <p className="mt-4 text-sm text-muted-foreground">
-              Free · macOS 12+ · No credit card required
+              Internal tool · macOS 12+ · Sign in with your Lyra account
             </p>
           </FadeIn>
         </div>

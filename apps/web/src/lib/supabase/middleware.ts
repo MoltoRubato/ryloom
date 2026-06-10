@@ -42,7 +42,22 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (user && (pathname === "/login" || pathname === "/signup")) {
+  // Internal tool: only accounts on the allowed email domain may use the app.
+  const allowedDomain = process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN ?? "lyratechnologies.com.au";
+  const domainAllowed =
+    !user ||
+    allowedDomain === "*" ||
+    (user.email ?? "").toLowerCase().endsWith(`@${allowedDomain.toLowerCase()}`);
+
+  if (user && isProtected && !domainAllowed) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    url.searchParams.set("error", "restricted_domain");
+    return NextResponse.redirect(url);
+  }
+
+  if (user && domainAllowed && (pathname === "/login" || pathname === "/signup")) {
     const url = request.nextUrl.clone();
     url.pathname = "/app";
     url.search = "";

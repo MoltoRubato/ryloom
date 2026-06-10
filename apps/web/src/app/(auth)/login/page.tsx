@@ -15,6 +15,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  EMAIL_PLACEHOLDER,
+  isAllowedEmailDomain,
+  RESTRICTED_DOMAIN_MESSAGE,
+} from "@/lib/allowed-domain";
 import { createClient } from "@/lib/supabase/client";
 
 function sanitizeNext(value: string | null): string | null {
@@ -46,11 +51,17 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [magicLinkSent, setMagicLinkSent] = useState(false);
 
-  const displayError = error ?? urlError;
+  const displayError =
+    error ??
+    (urlError === "restricted_domain" ? RESTRICTED_DOMAIN_MESSAGE : urlError);
 
   async function handlePasswordSignIn(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
+    if (!isAllowedEmailDomain(email)) {
+      setError(RESTRICTED_DOMAIN_MESSAGE);
+      return;
+    }
     setPending(true);
     const supabase = createClient();
     const { error: signInError } = await supabase.auth.signInWithPassword({
@@ -69,6 +80,10 @@ function LoginForm() {
   async function handleMagicLink(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
+    if (!isAllowedEmailDomain(email)) {
+      setError(RESTRICTED_DOMAIN_MESSAGE);
+      return;
+    }
     setPending(true);
     const supabase = createClient();
     const { error: otpError } = await supabase.auth.signInWithOtp({
@@ -156,7 +171,7 @@ function LoginForm() {
               id="email"
               type="email"
               name="email"
-              placeholder="you@company.com"
+              placeholder={EMAIL_PLACEHOLDER}
               autoComplete="email"
               autoFocus
               required

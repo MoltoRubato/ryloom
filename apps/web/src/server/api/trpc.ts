@@ -72,9 +72,26 @@ export const createTRPCRouter = t.router;
 
 export const publicProcedure = t.procedure;
 
+/**
+ * Internal-tool access control: accounts must belong to the allowed email
+ * domain (NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN). Set the env var to "*" to allow
+ * any domain. Public share/embed viewing is intentionally not restricted.
+ */
+export function isAllowedEmail(email: string | null | undefined): boolean {
+  const domain = env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN;
+  if (!domain || domain === "*") return true;
+  return !!email && email.toLowerCase().endsWith(`@${domain.toLowerCase()}`);
+}
+
 export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
   if (!ctx.user) {
     throw new TRPCError({ code: "UNAUTHORIZED" });
+  }
+  if (!isAllowedEmail(ctx.user.email)) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Ryloom is restricted to @${env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN} accounts.`,
+    });
   }
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
@@ -145,7 +162,9 @@ export async function requireMembership(
       message: "You don't have permission to do that in this workspace",
     });
   }
-  const planId = row.workspace.plan as PlanId;
+  // Internal tool: every workspace runs with full access regardless of the
+  // stored plan column (kept for schema compatibility).
+  const planId: PlanId = "enterprise";
   return {
     workspaceId,
     userId: ctx.user.id,

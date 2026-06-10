@@ -13,6 +13,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  EMAIL_PLACEHOLDER,
+  isAllowedEmailDomain,
+  RESTRICTED_DOMAIN_MESSAGE,
+} from "@/lib/allowed-domain";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 
@@ -38,6 +43,10 @@ export default function SignupPage() {
     if (passwordTooShort) return;
 
     setError(null);
+    if (!isAllowedEmailDomain(email)) {
+      setError(RESTRICTED_DOMAIN_MESSAGE);
+      return;
+    }
     setPending(true);
     const supabase = createClient();
     const { data, error: signUpError } = await supabase.auth.signUp({
@@ -159,7 +168,7 @@ export default function SignupPage() {
               id="email"
               type="email"
               name="email"
-              placeholder="you@company.com"
+              placeholder={EMAIL_PLACEHOLDER}
               autoComplete="email"
               required
               value={email}

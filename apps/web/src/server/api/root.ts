@@ -3,7 +3,6 @@ import { createCallerFactory, createTRPCRouter } from "@/server/api/trpc";
 import { adminRouter } from "@/server/api/routers/admin";
 import { aiRouter } from "@/server/api/routers/ai";
 import { analyticsRouter } from "@/server/api/routers/analytics";
-import { billingRouter } from "@/server/api/routers/billing";
 import { commentRouter } from "@/server/api/routers/comment";
 import { folderRouter } from "@/server/api/routers/folder";
 import { notificationRouter } from "@/server/api/routers/notification";
@@ -26,7 +25,6 @@ export const appRouter = createTRPCRouter({
   analytics: analyticsRouter,
   transcript: transcriptRouter,
   ai: aiRouter,
-  billing: billingRouter,
   admin: adminRouter,
   notification: notificationRouter,
   search: searchRouter,

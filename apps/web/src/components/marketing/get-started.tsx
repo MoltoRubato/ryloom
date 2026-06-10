@@ -36,12 +36,6 @@ export function GetStarted() {
                 Record at ryloom in your browser
               </Link>
             </span>
-            <Link
-              href="/pricing"
-              className="font-medium text-foreground underline-offset-4 transition-colors hover:text-primary hover:underline"
-            >
-              Teams &amp; pricing
-            </Link>
           </div>
         </FadeIn>
       </div>

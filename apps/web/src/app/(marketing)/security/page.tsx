@@ -137,23 +137,18 @@ export default function SecurityPage() {
               Need SSO, SCIM, retention, or audit exports?
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-              The full compliance toolkit ships with the Enterprise plan, and
-              our team will walk yours through every control.
+              The full compliance toolkit — SSO, SCIM provisioning, retention
+              policies, legal hold, and audit log exports — is built in and
+              available to every workspace.
             </p>
             <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/enterprise"
+                href="/download"
                 className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground shadow-md shadow-primary/20 transition-colors hover:bg-primary/90 sm:w-auto"
               >
-                Explore Enterprise
+                Get Ryloom
                 <ArrowRight className="size-4" />
               </Link>
-              <a
-                href="mailto:security@ryloom.com"
-                className="inline-flex w-full items-center justify-center rounded-xl border border-border bg-background px-6 py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-accent sm:w-auto"
-              >
-                security@ryloom.com
-              </a>
             </div>
           </div>
         </FadeIn>

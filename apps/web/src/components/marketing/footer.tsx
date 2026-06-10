@@ -4,9 +4,8 @@ import { RyloomLogo } from "@/components/marketing/logo";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 
 const FOOTER_LINKS = [
-  { label: "Pricing", href: "/pricing" },
   { label: "Security", href: "/security" },
-  { label: "Enterprise", href: "/enterprise" },
+  { label: "Download", href: "/download" },
   { label: "Chrome extension", href: "/download-extension" },
 ] as const;
 

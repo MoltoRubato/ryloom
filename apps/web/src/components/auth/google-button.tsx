@@ -5,6 +5,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { ALLOWED_EMAIL_DOMAIN, DOMAIN_RESTRICTED } from "@/lib/allowed-domain";
 import { createClient } from "@/lib/supabase/client";
 
 function GoogleIcon() {
@@ -52,6 +53,11 @@ export function GoogleButton({
       provider: "google",
       options: {
         redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeNext)}`,
+        // Hint Google to pre-filter to the company domain; real enforcement
+        // happens server-side in the callback route and middleware.
+        ...(DOMAIN_RESTRICTED
+          ? { queryParams: { hd: ALLOWED_EMAIL_DOMAIN } }
+          : {}),
       },
     });
     if (error) {

@@ -1,5 +1,12 @@
 # Ryloom — Build Context (read this fully before writing code)
 
+> **Status update (2026-06):** Ryloom now runs as an internal tool. The billing
+> router, Stripe webhook, and pricing/enterprise marketing pages were removed;
+> `getPlan()` returns a single full-access plan for every workspace, and access
+> is restricted to the email domain in `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`
+> (enforced in middleware, auth callbacks, and `protectedProcedure`). Plan-gate
+> helpers (`requirePlanFeature` etc.) still exist but never block.
+
 Ryloom is a full Loom clone: record screen/camera in the browser, resumable-upload
 to Supabase Storage, process with an FFmpeg worker, share with rich privacy
 controls, watch with analytics, transcripts, comments, and AI features.

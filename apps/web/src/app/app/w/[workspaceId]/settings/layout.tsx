@@ -5,7 +5,6 @@ import { useParams, usePathname } from "next/navigation";
 import {
   BarChart3,
   Blocks,
-  CreditCard,
   Palette,
   ScrollText,
   Settings,
@@ -18,7 +17,6 @@ import { cn } from "@/lib/utils";
 const NAV_ITEMS = [
   { label: "General", segment: "", icon: Settings },
   { label: "Members", segment: "/members", icon: Users },
-  { label: "Billing & plans", segment: "/billing", icon: CreditCard },
   { label: "Branding", segment: "/branding", icon: Palette },
   { label: "Security & compliance", segment: "/security", icon: ShieldCheck },
   { label: "Audit log", segment: "/audit-log", icon: ScrollText },

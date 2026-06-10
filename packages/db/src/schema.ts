@@ -263,7 +263,9 @@ export const workspaces = pgTable(
     brandColor: text("brand_color").default("#625DF5"),
     hideBranding: boolean("hide_branding").notNull().default(false),
     defaultPrivacy: videoPrivacyEnum("default_privacy").notNull().default("workspace"),
-    plan: planEnum("plan").notNull().default("free"),
+    // Internal tool: all workspaces run with full access; the column is kept
+    // for schema compatibility.
+    plan: planEnum("plan").notNull().default("enterprise"),
     // Enterprise controls
     allowedEmailDomains: text("allowed_email_domains").array(),
     enforceSso: boolean("enforce_sso").notNull().default(false),
