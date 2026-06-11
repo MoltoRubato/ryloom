@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "crypto";
 
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, ne, or, sql } from "drizzle-orm";
 
 import { processingJobs, recordingSessions, videos } from "@ryloom/db";
 
@@ -36,46 +36,69 @@ function tokenValid(provided: string | null): boolean {
 }
 
 /**
- * Finalizes uploads whose client vanished between completeUpload and
- * completeSession: the bytes are fully in R2 (a multipart object only
- * materializes once completed) but the video is wedged in 'uploading' with no
- * processing job — invisible to the queue check below. Mirrors
- * recording.completeSession; the worker's probe step fills in the
+ * Heals recordings that died partway through the finalize sequence
+ * (completeUpload → session 'completed' → video 'processing' → job insert).
+ * A crash at any point leaves a video wedged with no queued job — invisible
+ * to the queue check below. Three shapes, all sharing one invariant: it is
+ * only safe to process when the raw bytes are provably in R2.
+ *
+ *  - video 'uploading' + session unfinished → prove bytes via R2 HEAD
+ *    (a multipart object only materializes once completed), then finalize.
+ *  - video 'uploading' + session 'completed' → completeSession crashed after
+ *    its first write; session state already proves the bytes.
+ *  - video 'processing' + no transcode job ever inserted → the job insert
+ *    was lost; re-insert it. (Edited videos keep their original completed
+ *    transcode row, so they never match.)
+ *
+ * Mirrors recording.completeSession; the worker's probe fills in the
  * duration/dimensions the client never got to report.
  */
 async function finalizeOrphanedUploads(): Promise<number> {
   const cutoff = new Date(Date.now() - ORPHAN_MIN_AGE_MINUTES * 60_000);
+  const noTranscodeJob = sql`NOT EXISTS (
+    SELECT 1 FROM processing_jobs pj
+    WHERE pj.video_id = ${videos.id} AND pj.type = 'transcode'
+  )`;
   const orphans = await db
     .select({ session: recordingSessions, videoId: videos.id })
     .from(recordingSessions)
     .innerJoin(videos, eq(recordingSessions.videoId, videos.id))
     .where(
       and(
-        eq(videos.status, "uploading"),
-        inArray(recordingSessions.status, ["created", "recording", "uploading"]),
+        ne(recordingSessions.status, "canceled"),
         lt(recordingSessions.createdAt, cutoff),
+        or(
+          eq(videos.status, "uploading"),
+          and(eq(videos.status, "processing"), noTranscodeJob),
+        ),
       ),
     )
     .limit(ORPHAN_SWEEP_LIMIT);
 
   let finalized = 0;
   for (const { session, videoId } of orphans) {
-    const exists = await r2ObjectExists(session.uploadPath).catch(() => false);
-    if (!exists) continue; // upload never completed — leave it for client-side recovery
+    // A 'completed' session already proves completeUpload finished; anything
+    // earlier needs the object itself as evidence.
+    const bytesLanded =
+      session.status === "completed" ||
+      (await r2ObjectExists(session.uploadPath).catch(() => false));
+    if (!bytesLanded) continue; // upload never completed — leave it for client-side recovery
 
     // Claim the session exactly like completeSession would; losing the race
     // to a late client retry is fine — whoever flips it enqueues the job.
-    const claimed = await db
-      .update(recordingSessions)
-      .set({ status: "completed", completedAt: new Date() })
-      .where(
-        and(
-          eq(recordingSessions.id, session.id),
-          inArray(recordingSessions.status, ["created", "recording", "uploading"]),
-        ),
-      )
-      .returning({ id: recordingSessions.id });
-    if (claimed.length === 0) continue;
+    if (session.status !== "completed") {
+      const claimed = await db
+        .update(recordingSessions)
+        .set({ status: "completed", completedAt: new Date() })
+        .where(
+          and(
+            eq(recordingSessions.id, session.id),
+            inArray(recordingSessions.status, ["created", "recording", "uploading"]),
+          ),
+        )
+        .returning({ id: recordingSessions.id });
+      if (claimed.length === 0) continue;
+    }
 
     const plan = getPlan("enterprise");
     await db
@@ -86,21 +109,27 @@ async function finalizeOrphanedUploads(): Promise<number> {
         updatedAt: new Date(),
       })
       .where(eq(videos.id, videoId));
-    await db.insert(processingJobs).values({
-      videoId,
-      workspaceId: session.workspaceId,
-      type: "transcode",
-      priority: plan.priorityProcessing ? 10 : 0,
-      inputJson: {
-        sourceBucket: session.uploadBucket,
-        sourcePath: session.uploadPath,
-        mimeType: session.mimeType,
-        maxHeight: plan.maxResolution,
-        hls: plan.hlsStreaming,
-        transcribe: (plan.transcriptionMinutesPerMonth ?? 1) !== 0,
-        autoAi: plan.aiGenerationsPerMonth === null || (plan.aiGenerationsPerMonth ?? 0) > 0,
-      },
-    });
+    // Guarded insert: never double-queue if a transcode job snuck in since
+    // the candidate query (client retry, overlapping tick).
+    await db.execute(sql`
+      INSERT INTO processing_jobs (video_id, workspace_id, type, priority, input_json)
+      SELECT ${videoId}, ${session.workspaceId}, 'transcode', ${plan.priorityProcessing ? 10 : 0},
+             ${JSON.stringify({
+               sourceBucket: session.uploadBucket,
+               sourcePath: session.uploadPath,
+               mimeType: session.mimeType,
+               maxHeight: plan.maxResolution,
+               hls: plan.hlsStreaming,
+               transcribe: (plan.transcriptionMinutesPerMonth ?? 1) !== 0,
+               autoAi:
+                 plan.aiGenerationsPerMonth === null || (plan.aiGenerationsPerMonth ?? 0) > 0,
+             })}::jsonb
+      WHERE NOT EXISTS (
+        SELECT 1 FROM processing_jobs pj
+        WHERE pj.video_id = ${videoId} AND pj.type = 'transcode'
+          AND pj.status IN ('queued', 'running')
+      )
+    `);
     finalized += 1;
   }
   return finalized;
