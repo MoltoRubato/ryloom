@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Mic, MicOff, Pause, Play, RotateCcw, Square, Trash2 } from "lucide-react";
+import { Mic, MicOff, Pause, Play, RotateCcw, Square, Trash2, Video } from "lucide-react";
 
 import {
   AlertDialog,
@@ -32,6 +32,7 @@ export function RecordingControls({
   onStop,
   onRestart,
   onCancel,
+  onShowSelfView,
 }: {
   elapsedMs: number;
   remainingMs: number | null;
@@ -43,6 +44,8 @@ export function RecordingControls({
   onStop: () => void;
   onRestart: () => void;
   onCancel: () => void;
+  /** Re-opens the floating camera self-view after the user closed it. */
+  onShowSelfView?: () => void;
 }) {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
@@ -90,6 +93,18 @@ export function RecordingControls({
         >
           {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
         </Button>
+
+        {onShowSelfView && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onShowSelfView}
+            title="Show your camera again"
+            aria-label="Show your camera again"
+          >
+            <Video className="h-4 w-4" />
+          </Button>
+        )}
 
         {hasMic && (
           <Button

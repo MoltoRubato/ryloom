@@ -262,7 +262,8 @@ export const workspaces = pgTable(
     logoUrl: text("logo_url"),
     brandColor: text("brand_color").default("#625DF5"),
     hideBranding: boolean("hide_branding").notNull().default(false),
-    defaultPrivacy: videoPrivacyEnum("default_privacy").notNull().default("workspace"),
+    // Viewing is open by link: anyone with the share URL can watch.
+    defaultPrivacy: videoPrivacyEnum("default_privacy").notNull().default("public"),
     // Internal tool: all workspaces run with full access; the column is kept
     // for schema compatibility.
     plan: planEnum("plan").notNull().default("enterprise"),
@@ -404,7 +405,7 @@ export const videos = pgTable(
     title: text("title").notNull().default("Untitled video"),
     description: text("description"),
     status: videoStatusEnum("status").notNull().default("draft"),
-    privacy: videoPrivacyEnum("privacy").notNull().default("private"),
+    privacy: videoPrivacyEnum("privacy").notNull().default("public"),
     passwordHash: text("password_hash"),
     // Primary share token — every video gets one; extra links live in video_shares.
     shareToken: text("share_token")

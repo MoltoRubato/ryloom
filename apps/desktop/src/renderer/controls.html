@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <title>Ryloom controls</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+          Helvetica, Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /* The Loom-style floating vertical pill. Content-protected: visible to
+         the presenter, invisible in the recording. */
+      .bar {
+        width: 60px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        padding: 10px 0 12px;
+        border-radius: 999px;
+        background: rgba(18, 16, 26, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(8px);
+      }
+
+      .grip {
+        -webkit-app-region: drag;
+        width: 100%;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: rgba(255, 255, 255, 0.35);
+        cursor: grab;
+      }
+
+      .grip svg {
+        pointer-events: none;
+      }
+
+      button {
+        -webkit-app-region: no-drag;
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: rgba(255, 255, 255, 0.85);
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.12s ease, color 0.12s ease, transform 0.06s ease;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      button:active {
+        transform: scale(0.94);
+      }
+
+      #stop {
+        width: 44px;
+        height: 44px;
+        background: #f25c5c;
+        color: #fff;
+        box-shadow: 0 0 0 4px rgba(242, 92, 92, 0.25);
+      }
+
+      #stop:hover {
+        background: #ff6b6b;
+      }
+
+      .timer {
+        font-size: 11.5px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: #fff;
+        letter-spacing: 0.02em;
+        padding: 2px 0 1px;
+      }
+
+      .timer.paused {
+        color: #f5c95d;
+      }
+
+      .sep {
+        width: 26px;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.14);
+        margin: 2px 0;
+      }
+
+      #trash.armed {
+        background: rgba(242, 92, 92, 0.9);
+        color: #fff;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <div class="grip" title="Drag to move">
+        <svg width="14" height="8" viewBox="0 0 14 8" fill="currentColor">
+          <circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="11" cy="2" r="1.2"/>
+          <circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="11" cy="6" r="1.2"/>
+        </svg>
+      </div>
+
+      <button id="stop" title="Stop & get link">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      </button>
+
+      <div class="timer" id="timer">0:00</div>
+
+      <button id="pause" title="Pause">
+        <svg id="pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="3.4" height="14" rx="1.2"/><rect x="13.6" y="5" width="3.4" height="14" rx="1.2"/></svg>
+        <svg id="play-icon" class="hidden" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.52.86l10-6.5a1 1 0 0 0 0-1.72l-10-6.5A1 1 0 0 0 8 5.5z"/></svg>
+      </button>
+
+      <button id="restart" title="Restart recording">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+      </button>
+
+      <button id="trash" title="Discard recording">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+
+      <div class="sep"></div>
+
+      <button id="notes" title="Speaker notes">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+      </button>
+    </div>
+
+    <script>
+      const { ipcRenderer } = require("electron");
+
+      const send = (action) => ipcRenderer.send("controls-action", action);
+
+      const timerEl = document.getElementById("timer");
+      const pauseBtn = document.getElementById("pause");
+      const pauseIcon = document.getElementById("pause-icon");
+      const playIcon = document.getElementById("play-icon");
+      const trashBtn = document.getElementById("trash");
+
+      let paused = false;
+      let trashArmedAt = 0;
+
+      function formatTimer(ms) {
+        const total = Math.floor((ms || 0) / 1000);
+        const m = Math.floor(total / 60);
+        const s = String(total % 60).padStart(2, "0");
+        return `${m}:${s}`;
+      }
+
+      ipcRenderer.on("status", (_event, status) => {
+        timerEl.textContent = formatTimer(status.elapsedMs);
+        paused = status.state === "paused";
+        timerEl.classList.toggle("paused", paused);
+        pauseIcon.classList.toggle("hidden", paused);
+        playIcon.classList.toggle("hidden", !paused);
+        pauseBtn.title = paused ? "Resume" : "Pause";
+      });
+
+      document.getElementById("stop").addEventListener("click", () => send("stop"));
+      pauseBtn.addEventListener("click", () => send(paused ? "resume" : "pause"));
+      document.getElementById("restart").addEventListener("click", () => send("restart"));
+      document.getElementById("notes").addEventListener("click", () => send("notes"));
+
+      // Discard is destructive — require a second click within 3s.
+      trashBtn.addEventListener("click", () => {
+        const now = Date.now();
+        if (now - trashArmedAt < 3000) {
+          trashBtn.classList.remove("armed");
+          trashArmedAt = 0;
+          send("cancel");
+          return;
+        }
+        trashArmedAt = now;
+        trashBtn.classList.add("armed");
+        trashBtn.title = "Click again to discard";
+        setTimeout(() => {
+          if (Date.now() - trashArmedAt >= 2900) {
+            trashBtn.classList.remove("armed");
+            trashBtn.title = "Discard recording";
+            trashArmedAt = 0;
+          }
+        }, 3000);
+      });
+    </script>
+  </body>
+</html>

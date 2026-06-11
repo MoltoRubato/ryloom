@@ -149,6 +149,12 @@ export class RecorderEngine {
 
   private bubbleCorner: BubbleCorner;
   private bubbleSize: BubbleSize;
+  /**
+   * Whether drawCompositeFrame paints the camera bubble. Turned off when the
+   * floating self-view window is itself part of the captured screen (probed
+   * at start) — otherwise the recording would show the bubble twice.
+   */
+  private bubbleCompositing = true;
 
   private recorder: MediaRecorder | null = null;
   private actualMimeType: string;
@@ -189,6 +195,18 @@ export class RecorderEngine {
   /** Live camera stream for the on-page self-view bubble (preview only). */
   get cameraPreviewStream(): MediaStream | null {
     return this.cameraStream;
+  }
+
+  /** Raw screen stream — used by the self-view capture probe before start(). */
+  get screenCaptureStream(): MediaStream | null {
+    return this.screenStream;
+  }
+
+  /** What the user picked in the share picker: monitor | window | browser. */
+  get screenDisplaySurface(): string | null {
+    const track = this.screenStream?.getVideoTracks()[0];
+    const surface = track?.getSettings().displaySurface;
+    return typeof surface === "string" ? surface : null;
   }
 
   get isMicEnabled(): boolean {
@@ -358,7 +376,7 @@ export class RecorderEngine {
     }
 
     const cameraVideo = this.cameraVideo;
-    if (!cameraVideo || cameraVideo.readyState < 2) return;
+    if (!this.bubbleCompositing || !cameraVideo || cameraVideo.readyState < 2) return;
 
     // Bubble sizes are tuned for ~1080p output; scale up proportionally when
     // the captured screen is larger so the bubble never looks tiny on 4K.
@@ -651,5 +669,18 @@ export class RecorderEngine {
   setBubble(corner: BubbleCorner, size: BubbleSize): void {
     this.bubbleCorner = corner;
     this.bubbleSize = size;
+  }
+
+  /**
+   * Enables/disables drawing the camera bubble into the composite. Disabled
+   * when the floating self-view window is burned into the screen capture
+   * itself, so the recording shows exactly one bubble.
+   */
+  setBubbleCompositing(enabled: boolean): void {
+    this.bubbleCompositing = enabled;
+  }
+
+  get isBubbleCompositing(): boolean {
+    return this.bubbleCompositing;
   }
 }

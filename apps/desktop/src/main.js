@@ -3,7 +3,9 @@
  *
  * Responsibilities:
  *  - main control window (record panel)
- *  - floating circular camera bubble window
+ *  - floating circular camera bubble window (captured into the recording)
+ *  - floating recording control bar, countdown overlay and speaker notes —
+ *    all content-protected so they NEVER appear in the captured video
  *  - tray icon + menu
  *  - ryloom:// deep-link handling (browser → app auth token handoff)
  *  - privileged IPC: desktop capture sources, media permissions, clipboard,
@@ -31,11 +33,25 @@ const DEFAULT_APP_URL = "https://ryloom-web.vercel.app";
 
 let mainWindow = null;
 let bubbleWindow = null;
+let controlsWindow = null;
+let countdownWindow = null;
+let notesWindow = null;
 let tray = null;
 let isRecording = false;
 /** Deep-link auth tokens that arrived before the renderer was ready. */
 let pendingAuthTokens = null;
 let rendererReady = false;
+
+// Dev/QA escape hatch: content-protected windows are invisible to screenshots
+// too, which makes UI work on them impossible. Setting this env var keeps
+// them capturable.
+const CONTENT_PROTECTION_DISABLED =
+  process.env.RYLOOM_NO_CONTENT_PROTECTION === "1";
+
+/** Excludes a window from screen capture (and screenshots) where supported. */
+function protectFromCapture(win) {
+  if (!CONTENT_PROTECTION_DISABLED) win.setContentProtection(true);
+}
 
 // ---------------------------------------------------------------------------
 // Settings store — plain JSON file in userData, atomic writes.
@@ -212,6 +228,8 @@ function createMainWindow() {
     }
     isRecording = false;
     closeBubble();
+    closeControls();
+    closeCountdown();
   });
 
   mainWindow.on("closed", () => {
@@ -223,13 +241,17 @@ function createMainWindow() {
 }
 
 function showMainWindow() {
+  // The hub must never be on screen while recording — it would be captured.
+  // Every path that re-shows it (Dock activate, tray, deep links) funnels
+  // through here; stop flows clear isRecording before calling main-show.
+  if (isRecording) return;
   const win = createMainWindow();
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
 }
 
-function openBubble(deviceId, size) {
+function openBubble(deviceId, size, frame) {
   closeBubble();
   const bubbleSize = clampBubbleSize(size);
   const { workArea } = screen.getPrimaryDisplay();
@@ -260,7 +282,7 @@ function openBubble(deviceId, size) {
   bubbleWindow.setAlwaysOnTop(true, "floating");
   bubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   bubbleWindow.loadFile(path.join(__dirname, "renderer", "bubble.html"), {
-    query: { deviceId: deviceId || "" },
+    query: { deviceId: deviceId || "", frame: frame || "circle" },
   });
   bubbleWindow.on("closed", () => {
     bubbleWindow = null;
@@ -281,15 +303,196 @@ function clampBubbleSize(size) {
 }
 
 // ---------------------------------------------------------------------------
+// Recording control bar / countdown overlay / speaker notes
+// (all content-protected — they float on screen but never get recorded)
+// ---------------------------------------------------------------------------
+
+/** desktopCapturer screen sources carry display_id — map it to a Display. */
+function displayForId(displayId) {
+  const displays = screen.getAllDisplays();
+  if (displayId) {
+    const match = displays.find((d) => String(d.id) === String(displayId));
+    if (match) return match;
+  }
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+function openControls(displayId) {
+  closeControls();
+  const { workArea } = displayForId(displayId);
+  const width = 88;
+  const height = 360;
+
+  controlsWindow = new BrowserWindow({
+    width,
+    height,
+    x: workArea.x + 14,
+    y: Math.round(workArea.y + workArea.height / 2 - height / 2),
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    movable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+    },
+  });
+  protectFromCapture(controlsWindow);
+  // "screen-saver" floats above full-screen apps too.
+  controlsWindow.setAlwaysOnTop(true, "screen-saver");
+  controlsWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  controlsWindow.loadFile(path.join(__dirname, "renderer", "controls.html"));
+  controlsWindow.on("closed", () => {
+    controlsWindow = null;
+  });
+}
+
+function closeControls() {
+  if (controlsWindow && !controlsWindow.isDestroyed()) {
+    controlsWindow.destroy();
+  }
+  controlsWindow = null;
+}
+
+/**
+ * Shows the 3-2-1 countdown as a full-display overlay and resolves with
+ * `true` (countdown finished / skipped) or `false` (canceled).
+ */
+function runCountdownOverlay(displayId) {
+  return new Promise((resolve) => {
+    closeCountdown();
+    const display = displayForId(displayId);
+
+    let settled = false;
+    const settle = (completed) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeListener("countdown-done", onDone);
+      closeCountdown();
+      resolve(completed);
+    };
+    const onDone = (event, completed) => {
+      if (
+        countdownWindow &&
+        !countdownWindow.isDestroyed() &&
+        event.sender === countdownWindow.webContents
+      ) {
+        settle(Boolean(completed));
+      }
+    };
+
+    countdownWindow = new BrowserWindow({
+      ...display.bounds,
+      frame: false,
+      transparent: true,
+      hasShadow: false,
+      resizable: false,
+      movable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      enableLargerThanScreen: true,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false,
+        backgroundThrottling: false,
+      },
+    });
+    protectFromCapture(countdownWindow);
+    countdownWindow.setAlwaysOnTop(true, "screen-saver");
+    countdownWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    countdownWindow.setBounds(display.bounds); // transparent windows can shrink on create
+    countdownWindow.loadFile(path.join(__dirname, "renderer", "countdown.html"));
+    countdownWindow.once("ready-to-show", () => {
+      if (countdownWindow && !countdownWindow.isDestroyed()) countdownWindow.focus();
+    });
+    ipcMain.on("countdown-done", onDone);
+    countdownWindow.on("closed", () => {
+      countdownWindow = null;
+      settle(false);
+    });
+  });
+}
+
+function closeCountdown() {
+  if (countdownWindow && !countdownWindow.isDestroyed()) {
+    countdownWindow.destroy();
+  }
+  countdownWindow = null;
+}
+
+function toggleNotes() {
+  if (notesWindow && !notesWindow.isDestroyed()) {
+    notesWindow.destroy();
+    notesWindow = null;
+    return false;
+  }
+  const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const width = 380;
+  const height = 440;
+  notesWindow = new BrowserWindow({
+    width,
+    height,
+    minWidth: 280,
+    minHeight: 260,
+    x: workArea.x + workArea.width - width - 24,
+    y: Math.round(workArea.y + workArea.height / 2 - height / 2),
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+    },
+  });
+  protectFromCapture(notesWindow);
+  notesWindow.setAlwaysOnTop(true, "screen-saver");
+  notesWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  notesWindow.loadFile(path.join(__dirname, "renderer", "notes.html"));
+  notesWindow.on("closed", () => {
+    notesWindow = null;
+  });
+  return true;
+}
+
+function closeNotes() {
+  if (notesWindow && !notesWindow.isDestroyed()) {
+    notesWindow.destroy();
+  }
+  notesWindow = null;
+}
+
+// ---------------------------------------------------------------------------
 // Tray
 // ---------------------------------------------------------------------------
 
-// 16×16 violet rounded square with a white record dot (generated PNG).
-const TRAY_ICON_DATA_URL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAeUlEQVR42mNIiv3KQAlG5mgA8WYg/g7E/3Hg71A1GugGgAQ+49GIjj/DDIEZsJkEzTC8GdkArM7OSf8Gxni8AzcARbIw59v/06f+/IcBEBskhsUQ7AYga0Y2hCgDQE7GBbB4hwYGUOwFcgOR4mikOCFRnJQpzkxkYwBqQZC7REJYtwAAAABJRU5ErkJggg==";
+// Canonical Ryloom mark (violet rounded square + play circle) rasterized at
+// 16px/32px — keep in sync with apps/web/public/favicon.svg and build/icon.icns.
+const TRAY_ICON_16 =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAEKADAAQAAAABAAAAEAAAAAA0VXHyAAACPklEQVQ4EZ1TS2tTURD+5tyTe2NLk7axLsUHJrqsIoL4GwQpboQUSbQQcWlxISgKLhSXYkCpCAE3LgR/g7izXdpUfODSNm1NJI+be89x5tzcKCIuOnAfzHwzc8433xBGVrm0e0R5kxcMottEyFlr0pD7EilYi7YC3TNx//Xzl9OfJUDyqpY7F0ll60rpQhT12GPF/Q8jaL0PxkQta/q1lcbUK7pS3j1sKVgj0nljQpfEnRANATOqo7iNznA31w5QyufTRD/IDua1tf6Cp7P5KOq65DgGfB84fcZDqeQ5X7MZY+19jJDre+ySRlpP5OOhXaBKudvmwlOWjy3JcwcItesBCvsJnz4mPBw9ptDasqg/HmDzu3VFiI/DPHWoutizQpgcW2vg1p0s2m2Lp09CBhv2EWYKhKWaj1yOcP9uH1GUXEeIVSnbcueTpzzXWZIHA4uz5zSCLLDTsnhWD11MMIIVk1yV/CaElU542Fg32N62jofLVR83bgY4eEhha9O4mGBSciV3XCAt9N/vaAp/YsYFZETNDzGKxxVmZ8kx/mIlxKMHA3z7alCYUyiWlMPIWFNTQoRYhue8yqMStpeu+QgCwru3EQZ9jEmUmGBEE2KSu/cxsoh5cB2qLP5c1t7kw7+FNM9sF0dC2lhnIa3+FpJ0ZyEhHvaWqcxS9vco5ZClrBqN6S880KtctCVV3b2YpAzLOQiSR/6FZIkJRrCSI7ljPpN1njhveZ0ZOZMKTNBijmxrd3gfeZ27b9J1/gVe+xUqkyGoggAAAABJRU5ErkJggg==";
+const TRAY_ICON_32 =
+  "data:image/png;base64,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";
 
 function createTray() {
-  const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
+  const icon = nativeImage.createEmpty();
+  icon.addRepresentation({ scaleFactor: 1, dataURL: TRAY_ICON_16 });
+  icon.addRepresentation({ scaleFactor: 2, dataURL: TRAY_ICON_32 });
   tray = new Tray(icon);
   tray.setToolTip("Ryloom");
   tray.setContextMenu(
@@ -297,6 +500,7 @@ function createTray() {
       {
         label: "Start recording",
         click: () => {
+          if (isRecording) return; // control bar already on screen
           showMainWindow();
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send("tray-record");
@@ -307,6 +511,22 @@ function createTray() {
         label: "Open library",
         click: () => {
           shell.openExternal(`${getAppUrl()}/app`);
+        },
+      },
+      {
+        label: "Speaker notes",
+        click: () => toggleNotes(),
+      },
+      { type: "separator" },
+      {
+        // Self-host/dev affordance — the App URL panel lives out of the main
+        // UI; reachable here and via ⌘, in the app.
+        label: "Connection settings…",
+        click: () => {
+          showMainWindow();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("open-settings");
+          }
         },
       },
       { type: "separator" },
@@ -335,6 +555,7 @@ function registerIpc() {
     return sources.map((source) => ({
       id: source.id,
       name: source.name,
+      displayId: source.display_id || null,
       thumbnailDataUrl:
         source.thumbnail && !source.thumbnail.isEmpty()
           ? source.thumbnail.toDataURL()
@@ -424,8 +645,12 @@ function registerIpc() {
   });
 
   ipcMain.handle("bubble-open", (_event, payload) => {
-    const { deviceId, size } = payload || {};
-    openBubble(typeof deviceId === "string" ? deviceId : "", size);
+    const { deviceId, size, frame } = payload || {};
+    openBubble(
+      typeof deviceId === "string" ? deviceId : "",
+      size,
+      typeof frame === "string" ? frame : "circle",
+    );
     return true;
   });
 
@@ -455,6 +680,65 @@ function registerIpc() {
       width: next,
       height: next,
     });
+    return true;
+  });
+
+  // --- Recording control bar -------------------------------------------------
+
+  ipcMain.handle("controls-open", (_event, payload) => {
+    openControls(payload && payload.displayId);
+    return true;
+  });
+
+  ipcMain.handle("controls-close", () => {
+    closeControls();
+    return true;
+  });
+
+  // Timer/state pushes from the (hidden) main window → control bar.
+  ipcMain.handle("recording-status", (_event, status) => {
+    if (controlsWindow && !controlsWindow.isDestroyed()) {
+      controlsWindow.webContents.send("status", status || {});
+    }
+    return true;
+  });
+
+  // Button presses on the control bar → main window's recording state machine.
+  ipcMain.on("controls-action", (event, action) => {
+    const fromControls =
+      controlsWindow &&
+      !controlsWindow.isDestroyed() &&
+      event.sender === controlsWindow.webContents;
+    if (!fromControls) return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("controls-action", String(action || ""));
+    }
+  });
+
+  // --- Countdown overlay -------------------------------------------------------
+
+  ipcMain.handle("countdown-run", (_event, payload) =>
+    runCountdownOverlay(payload && payload.displayId),
+  );
+
+  // --- Speaker notes -------------------------------------------------------------
+
+  ipcMain.handle("notes-toggle", () => toggleNotes());
+
+  ipcMain.handle("notes-close", () => {
+    closeNotes();
+    return true;
+  });
+
+  // --- Main window visibility (hidden while recording so it's never captured) ---
+
+  ipcMain.handle("main-hide", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+    return true;
+  });
+
+  ipcMain.handle("main-show", () => {
+    showMainWindow();
     return true;
   });
 }
@@ -494,6 +778,11 @@ function bootstrap() {
   });
 
   app.on("activate", () => {
+    // While recording, the floating control bar is the only UI — summoning
+    // the hub (e.g. via the Dock) would put a second, capturable "recording
+    // info" window on screen. It reappears on its own when the recording
+    // stops.
+    if (isRecording) return;
     showMainWindow();
   });
 
@@ -504,5 +793,8 @@ function bootstrap() {
 
   app.on("before-quit", () => {
     closeBubble();
+    closeControls();
+    closeCountdown();
+    closeNotes();
   });
 }

@@ -11,6 +11,8 @@ next-env.d.ts
 # builds
 dist/
 build/
+# …except the desktop app's build resources (app icon)
+!apps/desktop/build/
 *.tsbuildinfo
 
 # misc

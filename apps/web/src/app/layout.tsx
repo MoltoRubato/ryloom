@@ -5,9 +5,11 @@ import { Geist } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "sonner";
 
+import { env } from "@/env";
 import { TRPCReactProvider } from "@/trpc/react";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(env.NEXT_PUBLIC_APP_URL),
   title: {
     default: "Ryloom — Async video messaging for work",
     template: "%s · Ryloom",

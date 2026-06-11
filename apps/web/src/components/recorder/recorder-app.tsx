@@ -24,6 +24,7 @@ import {
   saveSession,
   type RecoverySession,
 } from "@/lib/recorder/recovery";
+import { isSelfViewSupported, SelfView } from "@/lib/recorder/self-view";
 import { formatDuration } from "@/lib/utils";
 import { api } from "@/trpc/react";
 
@@ -137,12 +138,19 @@ export function RecorderApp() {
   const [hasMic, setHasMic] = useState(true);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [cameraPreview, setCameraPreview] = useState<MediaStream | null>(null);
+  // Floating self-view (Document PiP) — follows the presenter across tabs.
+  const [selfViewOpen, setSelfViewOpen] = useState(false);
+  // True when the self-view window is burned into the screen capture itself,
+  // i.e. it IS the bubble viewers see (canvas compositing turned off).
+  const [selfViewBurned, setSelfViewBurned] = useState(false);
+  const [displaySurface, setDisplaySurface] = useState<string | null>(null);
   const [permissionIssue, setPermissionIssue] = useState<RecorderAcquireError | null>(null);
   const [recoverySessions, setRecoverySessions] = useState<RecoverySession[]>([]);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [fileBusy, setFileBusy] = useState(false);
 
   const engineRef = useRef<RecorderEngine | null>(null);
+  const selfViewRef = useRef<SelfView | null>(null);
   const phaseRef = useRef<Phase>("setup");
   const sessionRef = useRef<ActiveSession | null>(null);
   const titleRef = useRef(title);
@@ -167,6 +175,35 @@ export function RecorderApp() {
     setSettings((current) => ({ ...current, ...patch }));
   }, []);
 
+  // --- Self-view (floating camera window) helpers ------------------------------
+
+  const closeSelfView = useCallback(() => {
+    selfViewRef.current?.close();
+    selfViewRef.current = null;
+    setSelfViewOpen(false);
+    setSelfViewBurned(false);
+  }, []);
+
+  /**
+   * Opens the floating self-view. MUST run inside a user gesture
+   * (requestWindow needs — and consumes — transient activation).
+   */
+  const openSelfView = useCallback(async (): Promise<SelfView | null> => {
+    if (!isSelfViewSupported()) return null;
+    const view = selfViewRef.current ?? new SelfView();
+    selfViewRef.current = view;
+    view.onUserClose = () => setSelfViewOpen(false);
+    const opened = await view.open();
+    setSelfViewOpen(opened);
+    if (opened) view.attachStream(engineRef.current?.cameraPreviewStream ?? null);
+    return opened ? view : null;
+  }, []);
+
+  /** "Show camera" in the control bar after the user closed the self-view. */
+  const reopenSelfView = useCallback(() => {
+    void openSelfView();
+  }, [openSelfView]);
+
   // --- Teardown helpers -------------------------------------------------------
 
   /** Destroys the engine, voids the server session and returns to setup. */
@@ -175,6 +212,7 @@ export function RecorderApp() {
       const engine = engineRef.current;
       engineRef.current = null;
       engine?.destroy();
+      closeSelfView();
       setCameraPreview(null);
       setPermissionIssue(null);
       pendingRetryRef.current = null;
@@ -194,7 +232,7 @@ export function RecorderApp() {
       setPhase("setup");
       if (!silent) toast.info("Recording discarded.");
     },
-    [cancelSessionAsync],
+    [cancelSessionAsync, closeSelfView],
   );
 
   // Release camera/mic/screen if the user navigates away mid-flow.
@@ -202,6 +240,8 @@ export function RecorderApp() {
     return () => {
       engineRef.current?.destroy();
       engineRef.current = null;
+      selfViewRef.current?.close();
+      selfViewRef.current = null;
     };
   }, []);
 
@@ -219,6 +259,7 @@ export function RecorderApp() {
       const size = engine.getOutputSize();
       engineRef.current = null;
       setCameraPreview(null);
+      closeSelfView();
 
       if (blob.size === 0) {
         toast.error("Nothing was captured — the recording came back empty.");
@@ -243,7 +284,7 @@ export function RecorderApp() {
     } finally {
       stoppingRef.current = false;
     }
-  }, [cancelSessionAsync]);
+  }, [cancelSessionAsync, closeSelfView]);
 
   useEffect(() => {
     stopRecordingRef.current = stopRecording;
@@ -283,6 +324,7 @@ export function RecorderApp() {
       });
       engineRef.current = engine;
 
+      console.debug("[recorder] acquiring streams…");
       try {
         await engine.acquire();
       } catch (error) {
@@ -299,6 +341,7 @@ export function RecorderApp() {
         return;
       }
 
+      console.debug("[recorder] streams acquired");
       pendingRetryRef.current = null;
       await saveSession({
         sessionId: active.sessionId,
@@ -312,6 +355,29 @@ export function RecorderApp() {
       }).catch(() => undefined);
 
       setCameraPreview(engine.cameraPreviewStream);
+
+      // Show the live camera in the floating self-view (opened during the
+      // Start click) and decide who draws the bubble in the recording.
+      const selfView = selfViewRef.current;
+      selfView?.attachStream(engine.cameraPreviewStream);
+      const surface = engine.screenDisplaySurface;
+      setDisplaySurface(surface);
+      console.debug("[recorder] surface:", surface, "selfView:", selfView?.isOpen ?? false);
+      let burned = false;
+      if (settings.mode === "screen_camera") {
+        if (surface === "monitor" && selfView?.isOpen && engine.screenCaptureStream) {
+          // Entire-screen capture MAY include the self-view window (it does
+          // not on Chromium builds with PiP capture-exclusion, e.g. current
+          // macOS Chrome). Probe the truth before any frame is recorded:
+          // if the window is in the capture, it IS the bubble — compositing
+          // a second one would double it.
+          burned = await selfView.probeCapturedInStream(engine.screenCaptureStream);
+        }
+        engine.setBubbleCompositing(!burned);
+      }
+      setSelfViewBurned(burned);
+      console.debug("[recorder] bubble mode:", burned ? "burned-in self-view" : "composited");
+
       setHasMic(settings.micEnabled);
       setMicOn(settings.micEnabled);
       setPaused(false);
@@ -344,6 +410,19 @@ export function RecorderApp() {
       return;
     }
     setPhase("starting");
+
+    // Open the floating self-view NOW, while the Start click's user
+    // activation is still valid — after the network call + screen picker it
+    // would be long gone. The camera attaches once streams are acquired.
+    // Timeboxed: a wedged PiP must never block the recording itself (the
+    // open resolving late is harmless — it just attaches when ready).
+    if (settings.mode !== "screen") {
+      await Promise.race([
+        openSelfView(),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+    }
+
     const mimeType = pickSupportedMimeType();
 
     let active: ActiveSession;
@@ -365,6 +444,7 @@ export function RecorderApp() {
       };
     } catch (error) {
       setPhase("setup");
+      closeSelfView();
       toast.error(
         error instanceof Error ? error.message : "Could not start a recording session.",
       );
@@ -376,7 +456,16 @@ export function RecorderApp() {
     sessionRef.current = active;
     setTitle(initialTitle ?? defaultRecordingTitle());
     await beginCapture(active, workspaceId);
-  }, [workspaceId, settings.mode, sourceUrl, initialTitle, createSessionAsync, beginCapture]);
+  }, [
+    workspaceId,
+    settings.mode,
+    sourceUrl,
+    initialTitle,
+    createSessionAsync,
+    beginCapture,
+    openSelfView,
+    closeSelfView,
+  ]);
 
   const retryCapture = useCallback(() => {
     const pending = pendingRetryRef.current;
@@ -779,6 +868,13 @@ export function RecorderApp() {
                       ? "Press play in the control bar below when you're ready to continue."
                       : "Switch to the window or tab you're presenting — everything is being captured. Use the controls below to pause or stop."}
                   </p>
+                  {settings.mode === "screen_camera" && selfViewOpen && (
+                    <p className="mx-auto mt-2 max-w-md text-xs text-muted-foreground/80">
+                      {selfViewBurned
+                        ? "Your floating camera window is part of the recording — drag it to where you want it to appear."
+                        : "Your floating camera window follows you everywhere; viewers see your bubble in the corner you picked."}
+                    </p>
+                  )}
                 </div>
               </>
             )}
@@ -807,13 +903,20 @@ export function RecorderApp() {
 
       {phase === "recording" && (
         <>
-          {settings.mode === "screen_camera" && (
-            <CameraBubble
-              stream={cameraPreview}
-              corner={settings.bubbleCorner}
-              size={settings.bubbleSize}
-            />
-          )}
+          {/* In-page bubble is only a fallback for browsers without the
+              floating self-view window — and never during entire-screen
+              capture, where it would be burned into the recording next to
+              the composited bubble. */}
+          {settings.mode === "screen_camera" &&
+            !selfViewOpen &&
+            !isSelfViewSupported() &&
+            displaySurface !== "monitor" && (
+              <CameraBubble
+                stream={cameraPreview}
+                corner={settings.bubbleCorner}
+                size={settings.bubbleSize}
+              />
+            )}
           <RecordingControls
             elapsedMs={elapsedMs}
             remainingMs={remainingMs}
@@ -825,6 +928,11 @@ export function RecorderApp() {
             onStop={() => void stopRecording()}
             onRestart={() => void restartRecording()}
             onCancel={() => void discardActive()}
+            onShowSelfView={
+              settings.mode !== "screen" && isSelfViewSupported() && !selfViewOpen
+                ? reopenSelfView
+                : undefined
+            }
           />
         </>
       )}

@@ -65,6 +65,12 @@ const state = {
     micDeviceId: null,
     camDeviceId: null,
     bubbleSize: 220,
+    effects: {
+      background: "none", // wallpaper behind the recording (composited)
+      padding: "md", // canvas inset, used when a background is active
+      corners: "rounded",
+      frame: "circle", // camera bubble frame
+    },
   },
   recorder: null,
   active: null, // createSession result + mimeType for the in-flight recording
@@ -74,12 +80,33 @@ const state = {
   upload: null, // in-flight multipart upload handle { aborted, xhrs }
   uploadDone: false,
   completePending: false,
-  countdownTimer: null,
   recTimer: null,
   permissionKind: "screen",
   starting: false,
   stopping: false,
+  restarting: false,
 };
+
+// Effects presets. Background ids must match recorder.js BACKGROUND_PAINTERS;
+// the CSS here only drives the swatch previews.
+const BG_PRESETS = [
+  { id: "none", label: "None", css: null },
+  { id: "aurora", label: "Aurora", css: "linear-gradient(135deg,#16102e,#4636b3 60%,#2c8f6e)" },
+  { id: "sunset", label: "Sunset", css: "linear-gradient(135deg,#ff7e5f,#feb47b)" },
+  { id: "ocean", label: "Ocean", css: "linear-gradient(180deg,#0f2027,#203a43,#2c5364)" },
+  { id: "candy", label: "Candy", css: "linear-gradient(135deg,#fc5c7d,#6a82fb)" },
+  { id: "forest", label: "Forest", css: "linear-gradient(135deg,#0b3d2e,#1d976c)" },
+  { id: "slate", label: "Slate", css: "linear-gradient(135deg,#1f1c2c,#4e54c8)" },
+  { id: "graphite", label: "Graphite", css: "linear-gradient(180deg,#1b1924,#2e2b3a)" },
+  { id: "lavender", label: "Lavender", css: "linear-gradient(135deg,#b993d6,#8ca6db)" },
+];
+
+const FRAME_PRESETS = [
+  { id: "circle", label: "Classic" },
+  { id: "gradient", label: "Gradient" },
+  { id: "square", label: "Square" },
+  { id: "none", label: "Borderless" },
+];
 
 // ---------------------------------------------------------------------------
 // DOM helpers
@@ -92,7 +119,6 @@ const VIEWS = [
   "auth",
   "home",
   "permission",
-  "countdown",
   "recording",
   "uploading",
   "done",
@@ -247,7 +273,12 @@ async function init() {
 
   const prefs = await storeGet("preferences");
   if (prefs && typeof prefs === "object") {
-    state.prefs = { ...state.prefs, ...prefs };
+    const defaults = state.prefs;
+    state.prefs = {
+      ...defaults,
+      ...prefs,
+      effects: { ...defaults.effects, ...(prefs.effects || {}) },
+    };
   }
   $("auth-app-url").textContent = state.appUrl;
   $("setting-app-url").value = state.appUrl;
@@ -267,9 +298,10 @@ async function init() {
       showAuthSection("main");
       setBanner(
         "auth-error",
-        `Can't reach Ryloom at ${state.appUrl}. Check the App URL in Settings (gear icon).`,
+        `Can't reach Ryloom at ${state.appUrl}. Check the App URL below.`,
       );
       setConfigStatus(`Failed: ${errorMessage(err, "network error")}`, "bad");
+      openSettings(); // surface the Advanced panel only when it's needed
       return;
     }
   }
@@ -456,6 +488,7 @@ function applyPrefsToUi() {
   $("countdown-toggle").checked = Boolean(state.prefs.countdownOn);
   $("mic-select").disabled = !state.prefs.micOn;
   $("cam-select").disabled = !state.prefs.camOn;
+  updateEffectsDot();
 }
 
 async function savePrefs() {
@@ -608,13 +641,14 @@ function fillDeviceSelect(select, devices, preferredId, fallbackLabel) {
 }
 
 function syncBubble() {
-  if (state.view !== "home" && state.view !== "recording" && state.view !== "countdown") {
+  if (state.view !== "home" && state.view !== "recording") {
     return;
   }
   if (state.prefs.camOn) {
     invoke("bubble-open", {
       deviceId: state.prefs.camDeviceId || $("cam-select").value || "",
       size: state.prefs.bubbleSize,
+      frame: state.prefs.effects.frame || "circle",
     });
   } else {
     invoke("bubble-close");
@@ -715,90 +749,95 @@ async function startRecordingFlow() {
     state.blob = null;
     state.uploadDone = false;
 
-    // Countdown
+    // Hide the hub BEFORE the countdown/capture starts so the panel never
+    // appears in the recording — the floating control bar (content-protected,
+    // never captured) takes over from here.
+    await invoke("main-hide");
+
+    // Countdown — a content-protected overlay across the whole recording
+    // display, like Loom's. Never appears in the captured video.
     if (state.prefs.countdownOn) {
-      const completed = await runCountdown();
+      const completed = await invoke("countdown-run", {
+        displayId: state.source.displayId || null,
+      });
       if (!completed) {
         await safeCancelSession();
         setView("home");
+        await invoke("main-show");
         return;
       }
     }
 
-    // Start capture.
-    state.recorder = new Recorder();
-    try {
-      await state.recorder.start({
-        sourceId: state.source.id,
-        micEnabled: Boolean(state.prefs.micOn),
-        micDeviceId: state.prefs.micDeviceId || $("mic-select").value || null,
-        onScreenEnded: () => stopRecordingFlow(),
-        onError: (err) => {
-          toast(`Recording error: ${errorMessage(err, "unknown")}`, "error");
-        },
-      });
-    } catch (err) {
-      state.recorder = null;
-      await safeCancelSession();
-      const name = err && err.name;
-      if (name === "NotAllowedError" || name === "NotReadableError") {
-        showPermissionCard("screen");
-      } else {
-        setView("home");
-        setBanner("home-error", `Couldn't start capture: ${errorMessage(err, "unknown error")}`);
-      }
-      return;
-    }
-
-    await invoke("set-recording", true);
-    $("rec-source-label").textContent = state.source.isScreen
-      ? `Recording ${screenLabel(state.source).toLowerCase()}`
-      : `Recording “${state.source.name}”`;
-    $("btn-pause").textContent = "Pause";
-    $("rec-dot").classList.remove("paused");
-    $("rec-state-label").textContent = "Recording";
-    $("rec-timer").textContent = "00:00";
-    setView("recording");
-
-    state.recTimer = setInterval(() => {
-      if (state.recorder) {
-        $("rec-timer").textContent = formatTimer(state.recorder.elapsedMs);
-      }
-    }, 200);
+    const started = await beginCapture();
+    if (!started) return;
   } finally {
     state.starting = false;
     recordBtn.disabled = false;
   }
 }
 
-function runCountdown() {
-  return new Promise((resolve) => {
-    let n = 3;
-    $("countdown-number").textContent = String(n);
-    setView("countdown");
+/** Starts the Recorder + control bar. Assumes state.active is set. */
+async function beginCapture() {
+  state.recorder = new Recorder();
+  try {
+    await state.recorder.start({
+      sourceId: state.source.id,
+      micEnabled: Boolean(state.prefs.micOn),
+      micDeviceId: state.prefs.micDeviceId || $("mic-select").value || null,
+      effects: {
+        background: state.prefs.effects.background,
+        padding: state.prefs.effects.padding,
+        corners: state.prefs.effects.corners,
+      },
+      onScreenEnded: () => stopRecordingFlow(),
+      onError: (err) => {
+        toast(`Recording error: ${errorMessage(err, "unknown")}`, "error");
+      },
+    });
+  } catch (err) {
+    state.recorder = null;
+    await safeCancelSession();
+    await invoke("main-show");
+    const name = err && err.name;
+    if (name === "NotAllowedError" || name === "NotReadableError") {
+      showPermissionCard("screen");
+    } else {
+      setView("home");
+      setBanner("home-error", `Couldn't start capture: ${errorMessage(err, "unknown error")}`);
+    }
+    return false;
+  }
 
-    const finish = (completed) => {
-      clearInterval(state.countdownTimer);
-      state.countdownTimer = null;
-      $("btn-countdown-cancel").onclick = null;
-      resolve(completed);
-    };
+  await invoke("set-recording", true);
+  $("rec-source-label").textContent = state.source.isScreen
+    ? `Recording ${screenLabel(state.source).toLowerCase()}`
+    : `Recording “${state.source.name}”`;
+  $("btn-pause").textContent = "Pause";
+  $("rec-dot").classList.remove("paused");
+  $("rec-state-label").textContent = "Recording";
+  $("rec-timer").textContent = "00:00";
+  setView("recording"); // shown only if the user re-opens the hidden hub
 
-    $("btn-countdown-cancel").onclick = () => finish(false);
+  await invoke("controls-open", { displayId: state.source.displayId || null });
+  startStatusTimer();
+  return true;
+}
 
-    state.countdownTimer = setInterval(() => {
-      n -= 1;
-      if (n <= 0) {
-        finish(true);
-      } else {
-        const el = $("countdown-number");
-        el.textContent = String(n);
-        // retrigger the pulse animation
-        el.style.animation = "none";
-        void el.offsetHeight;
-        el.style.animation = "";
-      }
-    }, 1000);
+/** Drives both the (hidden) hub's recording view and the floating bar. */
+function startStatusTimer() {
+  clearInterval(state.recTimer);
+  state.recTimer = setInterval(() => {
+    if (!state.recorder) return;
+    $("rec-timer").textContent = formatTimer(state.recorder.elapsedMs);
+    pushRecordingStatus();
+  }, 200);
+}
+
+function pushRecordingStatus() {
+  if (!state.recorder) return;
+  invoke("recording-status", {
+    elapsedMs: state.recorder.elapsedMs,
+    state: state.recorder.state,
   });
 }
 
@@ -815,6 +854,7 @@ function togglePause() {
     $("rec-dot").classList.remove("paused");
     $("rec-state-label").textContent = "Recording";
   }
+  pushRecordingStatus();
 }
 
 async function stopRecordingFlow() {
@@ -831,6 +871,7 @@ async function stopRecordingFlow() {
     state.blob = blob;
 
     await invoke("set-recording", false);
+    await invoke("controls-close");
     await invoke("bubble-close");
 
     const shareUrl = `${state.appUrl}/share/${state.active.shareToken}`;
@@ -851,6 +892,7 @@ async function stopRecordingFlow() {
     $("upload-error-actions").hidden = true;
     $("upload-title").textContent = "Uploading…";
     setView("uploading");
+    await invoke("main-show");
 
     startUpload();
   } finally {
@@ -858,20 +900,64 @@ async function stopRecordingFlow() {
   }
 }
 
-async function cancelRecordingFlow() {
+/**
+ * Discards the current recording. From the floating bar (`fromControls`) the
+ * bar itself already arm-confirmed the trash button, so no extra dialog.
+ */
+async function cancelRecordingFlow(fromControls = false) {
   if (!state.recorder) return;
-  const sure = window.confirm("Discard this recording? Nothing will be uploaded.");
-  if (!sure) return;
+  if (!fromControls) {
+    const sure = window.confirm("Discard this recording? Nothing will be uploaded.");
+    if (!sure) return;
+  }
 
   clearInterval(state.recTimer);
   state.recTimer = null;
   state.recorder.cancel();
   state.recorder = null;
   await invoke("set-recording", false);
+  await invoke("controls-close");
   await safeCancelSession();
   setView("home");
+  await invoke("main-show");
   syncBubble();
   toast("Recording discarded");
+}
+
+/**
+ * Restart from the floating bar: throw away what's recorded so far, run the
+ * countdown again and record into the same session/share link.
+ */
+async function restartRecordingFlow() {
+  if (!state.recorder || state.restarting || state.stopping) return;
+  state.restarting = true;
+  try {
+    clearInterval(state.recTimer);
+    state.recTimer = null;
+    state.recorder.cancel();
+    state.recorder = null;
+    await invoke("controls-close");
+
+    if (state.prefs.countdownOn) {
+      const completed = await invoke("countdown-run", {
+        displayId: state.source.displayId || null,
+      });
+      if (!completed) {
+        // Canceling the restart countdown discards the take entirely.
+        await invoke("set-recording", false);
+        await safeCancelSession();
+        setView("home");
+        await invoke("main-show");
+        syncBubble();
+        toast("Recording discarded");
+        return;
+      }
+    }
+
+    await beginCapture();
+  } finally {
+    state.restarting = false;
+  }
 }
 
 async function safeCancelSession() {
@@ -1114,7 +1200,82 @@ function resetForNewRecording() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// Effects panel (Backgrounds / Frames / Canvas)
+// ---------------------------------------------------------------------------
+
+function openEffects() {
+  renderBgGrid();
+  renderFrameGrid();
+  renderSegRow("padding-row", "padding");
+  renderSegRow("corners-row", "corners");
+  $("effects-overlay").hidden = false;
+}
+
+function updateEffectsDot() {
+  $("effects-dot").hidden = state.prefs.effects.background === "none";
+}
+
+function renderBgGrid() {
+  const grid = $("bg-grid");
+  grid.innerHTML = "";
+  for (const preset of BG_PRESETS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `swatch${preset.id === "none" ? " swatch-none" : ""}${
+      state.prefs.effects.background === preset.id ? " selected" : ""
+    }`;
+    if (preset.css) btn.style.background = preset.css;
+    const label = document.createElement("span");
+    label.className = "swatch-label";
+    label.textContent = preset.label;
+    btn.appendChild(label);
+    btn.addEventListener("click", () => {
+      state.prefs.effects.background = preset.id;
+      savePrefs();
+      renderBgGrid();
+      updateEffectsDot();
+    });
+    grid.appendChild(btn);
+  }
+}
+
+function renderFrameGrid() {
+  const grid = $("frame-grid");
+  grid.innerHTML = "";
+  for (const preset of FRAME_PRESETS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `opt-btn${state.prefs.effects.frame === preset.id ? " selected" : ""}`;
+    const preview = document.createElement("span");
+    preview.className = `opt-preview${preset.id !== "circle" ? ` frame-${preset.id}` : ""}`;
+    btn.appendChild(preview);
+    const label = document.createElement("span");
+    label.textContent = preset.label;
+    btn.appendChild(label);
+    btn.addEventListener("click", () => {
+      state.prefs.effects.frame = preset.id;
+      savePrefs();
+      renderFrameGrid();
+      syncBubble(); // live-apply to the open camera bubble
+    });
+    grid.appendChild(btn);
+  }
+}
+
+function renderSegRow(rowId, key) {
+  const row = $(rowId);
+  for (const btn of row.querySelectorAll(".seg-btn")) {
+    btn.classList.toggle("selected", btn.dataset.value === state.prefs.effects[key]);
+    btn.onclick = () => {
+      state.prefs.effects[key] = btn.dataset.value;
+      savePrefs();
+      renderSegRow(rowId, key);
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings (Advanced — self-host/dev only)
 // ---------------------------------------------------------------------------
 
 function openSettings() {
@@ -1169,10 +1330,10 @@ function wireEvents() {
   });
   $("btn-email-back").addEventListener("click", () => showAuthSection("main"));
   $("auth-email-form").addEventListener("submit", handleEmailSignIn);
-  $("auth-settings-btn").addEventListener("click", openSettings);
+  // Advanced (App URL) settings are tucked away: this link, ⌘, , or the tray.
+  $("auth-advanced-link").addEventListener("click", openSettings);
 
   // Home
-  $("home-settings-btn").addEventListener("click", openSettings);
   $("btn-signout").addEventListener("click", signOut);
   $("btn-open-library").addEventListener("click", () =>
     openExternal(`${state.appUrl}/app`),
@@ -1183,6 +1344,8 @@ function wireEvents() {
   });
   $("source-btn").addEventListener("click", openSourcePicker);
   $("btn-record").addEventListener("click", startRecordingFlow);
+  $("btn-effects").addEventListener("click", openEffects);
+  $("btn-notes").addEventListener("click", () => invoke("notes-toggle"));
 
   $("mic-toggle").addEventListener("change", async (event) => {
     state.prefs.micOn = event.target.checked;
@@ -1250,10 +1413,11 @@ function wireEvents() {
     if (state.session) syncBubble();
   });
 
-  // Recording
+  // Recording (the hidden hub's fallback view — primary controls live on the
+  // floating bar)
   $("btn-pause").addEventListener("click", togglePause);
   $("btn-stop").addEventListener("click", stopRecordingFlow);
-  $("btn-cancel-rec").addEventListener("click", cancelRecordingFlow);
+  $("btn-cancel-rec").addEventListener("click", () => cancelRecordingFlow(false));
 
   // Uploading
   $("btn-upload-retry").addEventListener("click", retryUpload);
@@ -1295,10 +1459,33 @@ function wireEvents() {
     if (event.target === $("sources-overlay")) $("sources-overlay").hidden = true;
   });
 
+  // Effects overlay
+  $("btn-effects-close").addEventListener("click", () => {
+    $("effects-overlay").hidden = true;
+  });
+  $("effects-overlay").addEventListener("click", (event) => {
+    if (event.target === $("effects-overlay")) $("effects-overlay").hidden = true;
+  });
+  const effectsTabs = $("effects-tabs").querySelectorAll(".effects-tab");
+  for (const tab of effectsTabs) {
+    tab.addEventListener("click", () => {
+      for (const t of effectsTabs) t.classList.toggle("active", t === tab);
+      for (const pane of ["backgrounds", "frames", "canvas"]) {
+        $(`effects-pane-${pane}`).hidden = pane !== tab.dataset.tab;
+      }
+    });
+  }
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       $("settings-overlay").hidden = true;
       $("sources-overlay").hidden = true;
+      $("effects-overlay").hidden = true;
+    }
+    // ⌘, — the standard macOS shortcut — opens the Advanced settings.
+    if (event.key === "," && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      openSettings();
     }
   });
 
@@ -1325,6 +1512,33 @@ function wireEvents() {
       toast("Already recording");
     }
   });
+
+  // Floating control bar buttons (forwarded by the main process).
+  ipcRenderer.on("controls-action", (_event, action) => {
+    switch (action) {
+      case "stop":
+        stopRecordingFlow();
+        break;
+      case "pause":
+      case "resume":
+        togglePause();
+        break;
+      case "restart":
+        restartRecordingFlow();
+        break;
+      case "cancel":
+        cancelRecordingFlow(true);
+        break;
+      case "notes":
+        invoke("notes-toggle");
+        break;
+      default:
+        break;
+    }
+  });
+
+  // Tray → "Connection settings…"
+  ipcRenderer.on("open-settings", () => openSettings());
 
   // Refresh device lists when hardware changes.
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {

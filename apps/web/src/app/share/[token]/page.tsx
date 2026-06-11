@@ -3,6 +3,8 @@ import { TRPCError } from "@trpc/server";
 
 import { ShareErrorCard } from "@/components/watch/error-card";
 import { SharePageClient } from "@/components/watch/share-page-client";
+import { env } from "@/env";
+import { resolvePublicSharedVideo } from "@/lib/public-video";
 import { api, HydrateClient } from "@/trpc/server";
 
 // Playback URLs are signed per-request — never cache this page.
@@ -24,6 +26,68 @@ function shareErrorMessage(error: unknown): string {
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { token } = await params;
+
+  const appUrl = env.NEXT_PUBLIC_APP_URL.replace(/\/+$/, "");
+  const pageUrl = `${appUrl}/share/${token}`;
+
+  // Public links get the full unfurl treatment: og:video + twitter:player so
+  // the video plays inline in Slack/Discord/iMessage, plus oEmbed discovery.
+  try {
+    const resolved = await resolvePublicSharedVideo(token);
+    if (resolved && resolved.video.status === "ready") {
+      const { video } = resolved;
+      const title = video.title;
+      const description =
+        video.description ?? "Watch this video on Ryloom — async video messaging for work.";
+      const thumbnail = video.customThumbnailUrl ?? video.thumbnailUrl;
+      const width = video.width ?? 1280;
+      const height = video.height ?? 720;
+      const mp4Url = `${appUrl}/api/playback/${token}/video.mp4`;
+      const embedUrl = `${appUrl}/embed/${token}`;
+
+      return {
+        title,
+        description,
+        alternates: {
+          canonical: pageUrl,
+          types: {
+            "application/json+oembed": [
+              {
+                url: `${appUrl}/api/oembed?url=${encodeURIComponent(pageUrl)}&format=json`,
+                title,
+              },
+            ],
+          },
+        },
+        openGraph: {
+          type: "video.other",
+          url: pageUrl,
+          siteName: "Ryloom",
+          title,
+          description,
+          images: thumbnail ? [{ url: thumbnail, width, height }] : undefined,
+          videos: [
+            { url: mp4Url, secureUrl: mp4Url, type: "video/mp4", width, height },
+            ...(resolved.allowEmbed
+              ? [{ url: embedUrl, secureUrl: embedUrl, type: "text/html", width, height }]
+              : []),
+          ],
+        },
+        twitter: resolved.allowEmbed
+          ? {
+              card: "player",
+              title,
+              description,
+              images: thumbnail ? [thumbnail] : undefined,
+              players: [{ playerUrl: embedUrl, streamUrl: mp4Url, width, height }],
+            }
+          : undefined,
+      };
+    }
+  } catch {
+    /* fall through to the minimal metadata below */
+  }
+
   try {
     const data = await api.video.getByShareToken({ token });
     return { title: data.state === "ok" ? data.video.title : data.title };

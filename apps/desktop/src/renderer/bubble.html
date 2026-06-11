@@ -45,6 +45,25 @@
         box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
       }
 
+      /* Effects → Frames. The bubble is captured into the recording, so the
+         frame is part of the video. */
+      .bubble.frame-gradient {
+        border: 4px solid transparent;
+        background:
+          linear-gradient(#17151f, #17151f) padding-box,
+          linear-gradient(135deg, #7a76ff, #3ecf8e) border-box;
+      }
+
+      .bubble.frame-square {
+        border-radius: 22%;
+      }
+
+      .bubble.frame-none {
+        border: none;
+        width: 100%;
+        height: 100%;
+      }
+
       video {
         width: 100%;
         height: 100%;
@@ -143,6 +162,11 @@
       const SIZES = { s: 160, m: 220, l: 320 };
       const params = new URLSearchParams(window.location.search);
       const deviceId = params.get("deviceId") || "";
+
+      const frame = params.get("frame") || "circle";
+      if (frame !== "circle") {
+        document.querySelector(".bubble").classList.add(`frame-${frame}`);
+      }
 
       const video = document.getElementById("cam");
       const errorEl = document.getElementById("error");

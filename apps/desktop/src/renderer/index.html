@@ -25,23 +25,12 @@
 
       <!-- ============================== AUTH ============================= -->
       <section class="view" id="view-auth" hidden>
-        <div class="auth-top">
-          <button class="icon-btn" id="auth-settings-btn" title="Settings">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
-        </div>
-
         <div class="auth-hero">
-          <svg class="logo" width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#7a76ff" />
-                <stop offset="100%" stop-color="#625DF5" />
-              </linearGradient>
-            </defs>
-            <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#rg)" />
-            <circle cx="32" cy="32" r="13" fill="none" stroke="#fff" stroke-width="3.5" opacity="0.9" />
-            <circle cx="32" cy="32" r="6" fill="#fff" />
+          <!-- Canonical Ryloom mark — keep in sync with apps/web/public/favicon.svg -->
+          <svg class="logo" width="64" height="64" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="8" fill="#625DF5" />
+            <circle cx="16" cy="16" r="8.5" fill="none" stroke="#fff" stroke-width="2.5" />
+            <path d="M14 12.5l5.5 3.5-5.5 3.5z" fill="#fff" />
           </svg>
           <h1>Ryloom</h1>
           <p>Record your screen. The share link is on your clipboard before the upload finishes.</p>
@@ -78,7 +67,10 @@
           <button class="btn btn-ghost btn-block" id="btn-email-back" type="button">Back</button>
         </form>
 
-        <div class="auth-footer" id="auth-footer">Connected to <span id="auth-app-url"></span></div>
+        <div class="auth-footer" id="auth-footer">
+          Connected to <span id="auth-app-url"></span>
+          <button class="link-btn subtle" id="auth-advanced-link" title="Self-hosting? Point the app at your own Ryloom instance">Advanced</button>
+        </div>
       </section>
 
       <!-- ============================== HOME ============================= -->
@@ -86,9 +78,6 @@
         <header class="home-header">
           <select class="select workspace-select" id="workspace-select" title="Workspace"></select>
           <div class="avatar" id="avatar" title=""></div>
-          <button class="icon-btn" id="home-settings-btn" title="Settings">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
           <button class="icon-btn" id="btn-signout" title="Sign out">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
           </button>
@@ -137,7 +126,20 @@
           <span class="record-dot"></span>
           Start recording
         </button>
-        <p class="hint">Your camera bubble floats on top and is captured automatically.</p>
+
+        <div class="feature-row">
+          <button class="feature-btn" id="btn-effects" title="Backgrounds, frames & canvas">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+            <span>Effects</span>
+            <span class="feature-dot" id="effects-dot" hidden></span>
+          </button>
+          <button class="feature-btn" id="btn-notes" title="Speaker notes — only you see them">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5z"/><path d="M15 3v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+            <span>Notes</span>
+          </button>
+        </div>
+
+        <p class="hint">Your camera bubble floats on top and is captured automatically. The control bar, countdown and notes stay out of the recording.</p>
 
         <div class="home-footer">
           <button class="link-btn" id="btn-open-library">
@@ -167,12 +169,8 @@
         </div>
       </section>
 
-      <!-- =========================== COUNTDOWN =========================== -->
-      <section class="view view-center" id="view-countdown" hidden>
-        <div class="countdown-number" id="countdown-number">3</div>
-        <div class="countdown-sub">Get ready…</div>
-        <button class="btn btn-ghost" id="btn-countdown-cancel" style="margin-top: 26px">Cancel</button>
-      </section>
+      <!-- The 3-2-1 countdown is a full-screen content-protected overlay
+           window (countdown.html) — it lives outside this hub. -->
 
       <!-- =========================== RECORDING =========================== -->
       <section class="view" id="view-recording" hidden>
@@ -248,11 +246,14 @@
       </section>
     </div>
 
-    <!-- ======================== SETTINGS OVERLAY ======================== -->
+    <!-- ===================== ADVANCED SETTINGS OVERLAY ====================
+         Self-host/dev affordance — intentionally out of the main UI.
+         Reachable via ⌘, , the tray's "Connection settings…", or the
+         "Advanced" link on the sign-in screen. -->
     <div class="overlay" id="settings-overlay" hidden>
       <div class="panel">
         <div class="panel-header">
-          <h2>Settings</h2>
+          <h2>Advanced</h2>
           <button class="icon-btn" id="btn-settings-close" title="Close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
           </button>
@@ -262,14 +263,68 @@
             <label class="label" for="setting-app-url">App URL</label>
             <input class="input" id="setting-app-url" type="url" placeholder="https://ryloom.example.com" spellcheck="false" />
             <div class="field-hint">
-              Point this at your Ryloom instance (self-hosted or cloud). The app
-              fetches its Supabase connection from
-              <code>/api/desktop-config</code> on this host.
+              For self-hosters and development only — most people never need to
+              change this. Point it at your Ryloom instance; the app fetches its
+              Supabase connection from <code>/api/desktop-config</code> on this
+              host.
             </div>
           </div>
           <div class="config-status" id="config-status">Not connected yet</div>
           <button class="btn btn-primary btn-block" id="btn-save-settings">Save &amp; reconnect</button>
           <div class="panel-footer-note" id="settings-version">Ryloom Desktop</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========================= EFFECTS OVERLAY ======================== -->
+    <div class="overlay" id="effects-overlay" hidden>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Effects</h2>
+          <button class="icon-btn" id="btn-effects-close" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div class="effects-tabs" id="effects-tabs">
+          <button class="effects-tab active" data-tab="backgrounds">Backgrounds</button>
+          <button class="effects-tab" data-tab="frames">Frames</button>
+          <button class="effects-tab" data-tab="canvas">Canvas</button>
+        </div>
+        <div class="panel-body">
+          <div class="effects-pane" id="effects-pane-backgrounds">
+            <p class="effects-hint">
+              Wallpaper behind your recording — your screen is inset on top of it.
+            </p>
+            <div class="swatch-grid" id="bg-grid"></div>
+          </div>
+          <div class="effects-pane" id="effects-pane-frames" hidden>
+            <p class="effects-hint">
+              Frame style for your floating camera bubble (it's part of the video).
+            </p>
+            <div class="option-grid" id="frame-grid"></div>
+          </div>
+          <div class="effects-pane" id="effects-pane-canvas" hidden>
+            <p class="effects-hint">
+              How your screen sits on the background. Applies when a background
+              is selected.
+            </p>
+            <div class="seg-block">
+              <div class="seg-label">Padding</div>
+              <div class="seg-row" id="padding-row">
+                <button class="seg-btn" data-value="none">None</button>
+                <button class="seg-btn" data-value="sm">S</button>
+                <button class="seg-btn" data-value="md">M</button>
+                <button class="seg-btn" data-value="lg">L</button>
+              </div>
+            </div>
+            <div class="seg-block">
+              <div class="seg-label">Corners</div>
+              <div class="seg-row" id="corners-row">
+                <button class="seg-btn" data-value="rounded">Rounded</button>
+                <button class="seg-btn" data-value="square">Square</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

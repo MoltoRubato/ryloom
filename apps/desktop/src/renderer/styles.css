@@ -1117,3 +1117,259 @@ body {
   color: var(--text-muted);
   font-size: 13px;
 }
+
+/* ------------------------------------------------------------------ */
+/* Effects & Notes feature row (home view)                              */
+/* ------------------------------------------------------------------ */
+
+.feature-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.feature-btn {
+  flex: 1;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  position: relative;
+}
+
+.feature-btn:hover {
+  background: var(--card-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.feature-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* ------------------------------------------------------------------ */
+/* Effects panel                                                       */
+/* ------------------------------------------------------------------ */
+
+.effects-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.effects-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.effects-tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.effects-tab.active {
+  color: #fff;
+  background: var(--primary);
+}
+
+.effects-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.swatch {
+  appearance: none;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  height: 64px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  background: var(--card);
+  transition: border-color 0.12s ease, transform 0.06s ease;
+  font-family: inherit;
+}
+
+.swatch:hover {
+  border-color: var(--border-strong);
+}
+
+.swatch:active {
+  transform: scale(0.97);
+}
+
+.swatch.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.swatch .swatch-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 3px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(10, 9, 16, 0.55);
+  text-align: left;
+}
+
+.swatch.swatch-none .swatch-label {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.swatch.swatch-none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.opt-btn {
+  appearance: none;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 12px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.opt-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.opt-btn.selected {
+  border-color: var(--primary);
+  color: var(--text);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.opt-preview {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #3a364a;
+  border: 3px solid rgba(255, 255, 255, 0.85);
+}
+
+.opt-preview.frame-gradient {
+  border: 3px solid transparent;
+  background:
+    linear-gradient(#3a364a, #3a364a) padding-box,
+    linear-gradient(135deg, #7a76ff, #3ecf8e) border-box;
+}
+
+.opt-preview.frame-square {
+  border-radius: 26%;
+}
+
+.opt-preview.frame-none {
+  border: none;
+}
+
+.seg-block {
+  margin-bottom: 16px;
+}
+
+.seg-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 7px;
+}
+
+.seg-row {
+  display: flex;
+  gap: 6px;
+}
+
+.seg-btn {
+  flex: 1;
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.seg-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.seg-btn.selected {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+/* Subtle "Advanced" link in the auth footer */
+.link-btn.subtle {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-left: 8px;
+}
+
+.link-btn.subtle:hover {
+  color: var(--text-muted);
+}
