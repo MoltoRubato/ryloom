@@ -8,6 +8,15 @@ import path from "node:path";
 
 const STDERR_TAIL_BYTES = 8_192;
 
+/**
+ * Watchdog ceilings. Any single FFmpeg invocation on our inputs (≤4K screen
+ * recordings, plan-capped lengths) finishes in minutes; a run that hits these
+ * is wedged or pathological and must fail the job with a real error instead
+ * of zombie-ing until the Cloud Run task timeout kills the container.
+ */
+const FFMPEG_TIMEOUT_MS = 30 * 60 * 1000;
+const FFPROBE_TIMEOUT_MS = 5 * 60 * 1000;
+
 type RunResult = { stdout: Buffer; stderr: string };
 
 /**
@@ -18,7 +27,7 @@ type RunResult = { stdout: Buffer; stderr: string };
 function run(
   bin: string,
   args: string[],
-  opts: { captureStdout?: boolean } = {},
+  opts: { captureStdout?: boolean; timeoutMs?: number } = {},
 ): Promise<RunResult> {
   return new Promise<RunResult>((resolve, reject) => {
     const child = spawn(bin, args);
@@ -26,6 +35,13 @@ function run(
 
     const stdoutChunks: Buffer[] = [];
     let stderrTail = "";
+    let timedOut = false;
+    const killTimer = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, opts.timeoutMs)
+      : null;
 
     child.stdout.on("data", (chunk: Buffer) => {
       if (opts.captureStdout) stdoutChunks.push(chunk);
@@ -37,10 +53,18 @@ function run(
       }
     });
     child.on("error", (err) => {
+      if (killTimer) clearTimeout(killTimer);
       reject(new Error(`Failed to spawn ${bin}: ${err.message}`));
     });
     child.on("close", (code) => {
-      if (code === 0) {
+      if (killTimer) clearTimeout(killTimer);
+      if (timedOut) {
+        reject(
+          new Error(
+            `${bin} killed after exceeding ${Math.round((opts.timeoutMs ?? 0) / 60_000)} min (args: ${args.join(" ")})\n--- stderr tail ---\n${stderrTail}`,
+          ),
+        );
+      } else if (code === 0) {
         resolve({ stdout: Buffer.concat(stdoutChunks), stderr: stderrTail });
       } else {
         reject(
@@ -54,11 +78,17 @@ function run(
 }
 
 function ffmpeg(args: string[], opts: { captureStdout?: boolean } = {}): Promise<RunResult> {
-  return run("ffmpeg", ["-hide_banner", "-nostdin", "-y", ...args], opts);
+  return run("ffmpeg", ["-hide_banner", "-nostdin", "-y", ...args], {
+    ...opts,
+    timeoutMs: FFMPEG_TIMEOUT_MS,
+  });
 }
 
 function ffprobe(args: string[]): Promise<RunResult> {
-  return run("ffprobe", ["-hide_banner", ...args], { captureStdout: true });
+  return run("ffprobe", ["-hide_banner", ...args], {
+    captureStdout: true,
+    timeoutMs: FFPROBE_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -115,7 +145,13 @@ function parseFps(stream: FfprobeStream): number {
     const n = Number(num);
     const d = den === undefined ? 1 : Number(den);
     if (Number.isFinite(n) && Number.isFinite(d) && d > 0 && n > 0) {
-      return Math.round(n / d);
+      const fps = Math.round(n / d);
+      // MediaRecorder WebM (canvas/tab captures) reports its 1/1000 timebase
+      // as r_frame_rate=1000/1 — a container artifact, not a real frame rate.
+      // Only r_frame_rate carries it; a measured avg_frame_rate (e.g. real
+      // 240/360fps slow-motion footage) is always trusted.
+      if (raw === stream.r_frame_rate && fps > 240) continue;
+      return fps;
     }
   }
   return 30;
@@ -183,6 +219,11 @@ export async function transcodeMp4(params: {
     params.input,
     "-vf",
     scaleFilter(params.maxHeight),
+    // MediaRecorder WebM advertises a 1000/1 nominal rate (1ms timebase);
+    // without vfr, ffmpeg ≤5.x CFR-expands a 30s clip to ~30,000 duplicated
+    // frames and the encode takes hours. vfr keeps the real timestamps.
+    "-fps_mode",
+    "vfr",
     "-c:v",
     "libx264",
     "-preset",
@@ -352,6 +393,13 @@ export async function hlsLadder(params: {
       params.input,
       "-vf",
       scaleFilter(h),
+      // vfr: see transcodeMp4 — never CFR-expand bogus 1000fps WebM rates.
+      "-fps_mode",
+      "vfr",
+      // Force a keyframe at every segment boundary so 4s VOD segments cut
+      // cleanly regardless of the source's GOP cadence.
+      "-force_key_frames",
+      "expr:gte(t,n_forced*4)",
       "-c:v",
       "libx264",
       "-preset",
@@ -518,6 +566,8 @@ export async function cutKeepRanges(params: {
   ];
   if (hasAudio) args.push("-map", "[outa]", "-c:a", "aac", "-b:a", "128k");
   args.push(
+    "-fps_mode",
+    "vfr",
     "-c:v",
     "libx264",
     "-preset",

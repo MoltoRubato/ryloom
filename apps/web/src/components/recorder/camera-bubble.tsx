@@ -1,40 +1,52 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 
-import { type BubbleCorner } from "@/lib/recorder/engine";
+import { type BubblePosition, type BubbleSize, BUBBLE_SIZES } from "@/lib/recorder/engine";
+import { type BubbleFrame, FRAME_GRADIENT_STOPS } from "@/lib/recorder/effects";
 import { cn } from "@/lib/utils";
 
-const EDGE_PADDING = 16;
+const SIZE_LABELS: Record<BubbleSize, string> = { 160: "S", 220: "M", 320: "L" };
 
 /**
- * Draggable self-view bubble shown while recording in screen_camera mode.
- * This is a preview only — the actual composite is drawn on the engine's
- * offscreen canvas, so moving this bubble does not move the recorded one.
+ * The presenter's draggable self-view bubble — what you see is what viewers
+ * get. Its normalized center position is reported on drag so the engine
+ * composites the recorded bubble at exactly the same spot, and the S/M/L
+ * hover controls resize both in lockstep (desktop-app parity).
  */
 export function CameraBubble({
   stream,
-  corner,
+  position,
   size,
+  frame,
+  onPositionChange,
+  onSizeChange,
+  onHide,
 }: {
   stream: MediaStream | null;
-  corner: BubbleCorner;
-  size: number;
+  /** Normalized bubble center (0..1 of the viewport — and of the recording). */
+  position: BubblePosition;
+  size: BubbleSize;
+  frame: BubbleFrame;
+  onPositionChange: (position: BubblePosition) => void;
+  onSizeChange: (size: BubbleSize) => void;
+  /** Hides the bubble AND removes the camera from the recording. */
+  onHide?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Re-render on resize so the px position derived from the normalized
+  // center stays glued to the right spot.
+  const [, setViewport] = useState(0);
 
-  // Cap the on-page preview so a 280px composite bubble doesn't dominate
-  // smaller laptop screens; the recorded bubble keeps the configured size.
-  const diameter = Math.min(size, 200);
+  useEffect(() => {
+    const onResize = () => setViewport((v) => v + 1);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
-  // The <video> only exists once a position has been computed (the component
-  // renders null until then), so this effect must also re-run on that flip —
-  // with [stream] alone it would fire before the element mounts and the
-  // bubble would stay black.
-  const mounted = position !== null;
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -45,35 +57,21 @@ export function CameraBubble({
     return () => {
       video.srcObject = null;
     };
-  }, [stream, mounted]);
+  }, [stream]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const x = corner.endsWith("right")
-      ? window.innerWidth - diameter - EDGE_PADDING * 2
-      : EDGE_PADDING * 2;
-    const y = corner.startsWith("bottom")
-      ? window.innerHeight - diameter - 120 // keep clear of the control bar
-      : EDGE_PADDING * 2 + 64;
-    setPosition({
-      x: Math.max(EDGE_PADDING, x),
-      y: Math.max(EDGE_PADDING, y),
-    });
-  }, [corner, diameter]);
+  if (!stream || typeof window === "undefined") return null;
 
-  const clamp = (x: number, y: number) => ({
-    x: Math.min(Math.max(x, EDGE_PADDING), window.innerWidth - diameter - EDGE_PADDING),
-    y: Math.min(Math.max(y, EDGE_PADDING), window.innerHeight - diameter - EDGE_PADDING),
-  });
+  const radius = size / 2;
+  const cx = clamp(position.x * window.innerWidth, radius, window.innerWidth - radius);
+  const cy = clamp(position.y * window.innerHeight, radius, window.innerHeight - radius);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!position) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
-      offsetX: event.clientX - position.x,
-      offsetY: event.clientY - position.y,
+      offsetX: event.clientX - cx,
+      offsetY: event.clientY - cy,
     };
     setDragging(true);
   };
@@ -81,7 +79,9 @@ export function CameraBubble({
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setPosition(clamp(event.clientX - drag.offsetX, event.clientY - drag.offsetY));
+    const nextX = clamp(event.clientX - drag.offsetX, radius, window.innerWidth - radius);
+    const nextY = clamp(event.clientY - drag.offsetY, radius, window.innerHeight - radius);
+    onPositionChange({ x: nextX / window.innerWidth, y: nextY / window.innerHeight });
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -96,33 +96,84 @@ export function CameraBubble({
     }
   };
 
-  if (!stream || !position) return null;
-
   return (
     <div
       className={cn(
-        "fixed z-40 touch-none select-none overflow-hidden rounded-full border-4 border-white/90 bg-black shadow-2xl",
+        "group fixed z-40 touch-none select-none",
         dragging ? "cursor-grabbing" : "cursor-grab",
       )}
       style={{
-        width: diameter,
-        height: diameter,
-        left: position.x,
-        top: position.y,
+        width: size,
+        height: size,
+        left: cx - radius,
+        top: cy - radius,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      title="Drag to move your self-view (preview only)"
+      title="Drag to move your camera — viewers see it exactly here"
     >
-      <video
-        ref={videoRef}
-        muted
-        playsInline
-        autoPlay
-        className="h-full w-full -scale-x-100 object-cover"
-      />
+      <div
+        className="h-full w-full overflow-hidden bg-black shadow-2xl"
+        style={{
+          borderRadius: frame === "square" ? "22%" : "9999px",
+          ...(frame === "gradient"
+            ? {
+                border: "4px solid transparent",
+                background: `linear-gradient(#17151f, #17151f) padding-box, linear-gradient(135deg, ${FRAME_GRADIENT_STOPS[0]}, ${FRAME_GRADIENT_STOPS[1]}) border-box`,
+              }
+            : frame === "none"
+              ? {}
+              : { border: "4px solid rgba(255, 255, 255, 0.9)" }),
+        }}
+      >
+        <video
+          ref={videoRef}
+          muted
+          playsInline
+          autoPlay
+          className="h-full w-full -scale-x-100 object-cover"
+          style={{ borderRadius: frame === "square" ? "18%" : "9999px" }}
+        />
+      </div>
+
+      {/* Hover controls — S/M/L size + hide, like the desktop bubble. */}
+      <div
+        className="absolute bottom-[10%] left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full bg-black/75 p-1 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {BUBBLE_SIZES.map((candidate) => (
+          <button
+            key={candidate}
+            type="button"
+            onClick={() => onSizeChange(candidate)}
+            title={`${candidate}px bubble`}
+            className={cn(
+              "h-6 w-6 rounded-full text-[11px] font-semibold transition-colors",
+              candidate === size
+                ? "bg-white text-black"
+                : "text-white/80 hover:bg-white/20 hover:text-white",
+            )}
+          >
+            {SIZE_LABELS[candidate]}
+          </button>
+        ))}
+        {onHide && (
+          <button
+            type="button"
+            onClick={onHide}
+            title="Hide camera (removes it from the recording)"
+            className="flex h-6 w-6 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
     </div>
   );
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

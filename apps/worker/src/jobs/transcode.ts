@@ -61,11 +61,14 @@ export async function processVideoFile(params: {
   notifyReady: boolean;
 }): Promise<Record<string, unknown>> {
   const { video, localSource, workDir } = params;
+  const step = (message: string) =>
+    console.log(`[${new Date().toISOString()}] [video ${video.id}] ${message}`);
 
   const src = await probe(localSource);
   if (src.width === 0 || src.height === 0) {
     throw new Error("Source file contains no decodable video stream");
   }
+  step(`probed ${src.width}x${src.height} ${src.durationMs}ms fps=${src.fps}`);
 
   // --- Transcode the playback MP4 -------------------------------------------
   const dims = fitDimensions(src.width, src.height, params.maxHeight);
@@ -77,6 +80,7 @@ export async function processVideoFile(params: {
     maxHeight: params.maxHeight,
     hasAudio: src.hasAudio,
   });
+  step(`mp4 ${label} encoded`);
 
   const out = await probe(mp4Local);
   const durationMs = out.durationMs || src.durationMs;
@@ -92,6 +96,7 @@ export async function processVideoFile(params: {
   const waveform = await waveformJson(mp4Local, out.hasAudio);
   const waveformLocal = path.join(workDir, "waveform.json");
   await fs.writeFile(waveformLocal, JSON.stringify(waveform), "utf8");
+  step("thumbnail + gif + waveform done");
 
   let renditions: Awaited<ReturnType<typeof hlsLadder>> = [];
   const hlsLocal = path.join(workDir, "hls");
@@ -104,6 +109,7 @@ export async function processVideoFile(params: {
       sourceHeight: out.height,
       hasAudio: out.hasAudio,
     });
+    step(`hls ladder done (${renditions.map((r) => `${r.height}p`).join(",")})`);
   }
 
   // --- Uploads -----------------------------------------------------------------
@@ -241,6 +247,11 @@ export async function runTranscodeJob(job: ClaimedJob): Promise<Record<string, u
   if (!job.videoId) throw new Error("transcode job is missing videoId");
   const input = transcodeInput.parse(job.inputJson);
   const video = await getVideoOrThrow(job.videoId);
+  // The owner can delete a video while its (re)transcode is still queued or
+  // retrying — don't burn minutes of encode on bytes nobody can watch.
+  if (video.status === "deleted") {
+    return { skipped: "video was deleted before transcoding ran" };
+  }
   const revert = input.revert === true;
 
   // maxHeight: null from the plan means "uncapped" — we still cap at 4K.

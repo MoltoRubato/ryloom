@@ -9,13 +9,33 @@
  * client event handlers/effects.
  */
 
+import {
+  BACKGROUND_PAINTERS,
+  DEFAULT_EFFECTS,
+  FRAME_GRADIENT_STOPS,
+  PADDING_FRACTIONS,
+  type RecorderEffects,
+} from "./effects";
+
 export type RecordingMode = "screen" | "camera" | "screen_camera";
 
 export type BubbleCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
-export type BubbleSize = 160 | 220 | 280;
+/** S/M/L presets — must match the desktop bubble (bubble.html SIZES). */
+export type BubbleSize = 160 | 220 | 320;
 
-export const BUBBLE_SIZES: readonly BubbleSize[] = [160, 220, 280] as const;
+export const BUBBLE_SIZES: readonly BubbleSize[] = [160, 220, 320] as const;
+
+/** Bubble center as a fraction of the output frame (0..1 on both axes). */
+export type BubblePosition = { x: number; y: number };
+
+/** Where a corner preset places the bubble center, normalized. */
+export function cornerToPosition(corner: BubbleCorner): BubblePosition {
+  return {
+    x: corner.endsWith("right") ? 0.9 : 0.1,
+    y: corner.startsWith("bottom") ? 0.84 : 0.16,
+  };
+}
 
 /** Preference-ordered container/codec candidates — the first supported wins. */
 const MIME_CANDIDATES = [
@@ -116,8 +136,11 @@ export type RecorderEngineConfig = {
   cameraDeviceId?: string;
   /** Capture tab/system audio alongside the screen (screen modes only). */
   systemAudio: boolean;
-  bubbleCorner: BubbleCorner;
+  /** Initial bubble center, normalized to the output frame. */
+  bubblePosition: BubblePosition;
   bubbleSize: BubbleSize;
+  /** Background / canvas / bubble-frame effects (desktop-app parity). */
+  effects: RecorderEffects;
   mimeType: string;
   /** Fires once per ~1s timeslice with the chunk and its sequence number. */
   onChunk: (chunk: Blob, seq: number) => void;
@@ -147,12 +170,13 @@ export class RecorderEngine {
   private hiddenDrawTimer: number | null = null;
   private lastDrawAt = 0;
 
-  private bubbleCorner: BubbleCorner;
+  private bubblePosition: BubblePosition;
   private bubbleSize: BubbleSize;
+  private effects: RecorderEffects;
   /**
    * Whether drawCompositeFrame paints the camera bubble. Turned off when the
-   * floating self-view window is itself part of the captured screen (probed
-   * at start) — otherwise the recording would show the bubble twice.
+   * in-page bubble is itself part of the captured pixels (probed at start) —
+   * otherwise the recording would show the bubble twice.
    */
   private bubbleCompositing = true;
 
@@ -174,8 +198,9 @@ export class RecorderEngine {
   constructor(config: RecorderEngineConfig) {
     this.config = config;
     this.actualMimeType = config.mimeType;
-    this.bubbleCorner = config.bubbleCorner;
+    this.bubblePosition = config.bubblePosition;
     this.bubbleSize = config.bubbleSize;
+    this.effects = config.effects ?? DEFAULT_EFFECTS;
     this.micOn = config.micEnabled;
   }
 
@@ -308,12 +333,17 @@ export class RecorderEngine {
 
   private async buildVideoTrack(): Promise<MediaStreamTrack | null> {
     const { mode } = this.config;
-    if (mode === "screen") return this.screenStream?.getVideoTracks()[0] ?? null;
     if (mode === "camera") return this.cameraStream?.getVideoTracks()[0] ?? null;
+    // Plain screen capture stays a zero-cost raw track unless a background
+    // effect needs the canvas compositor.
+    if (mode === "screen" && this.effects.background === "none") {
+      return this.screenStream?.getVideoTracks()[0] ?? null;
+    }
 
-    // screen_camera — composite the camera bubble over the screen on an
-    // offscreen canvas sized to the captured screen.
-    if (!this.screenStream || !this.cameraStream) return null;
+    // Composite the camera bubble and/or background effect over the screen on
+    // an offscreen canvas sized to the captured screen.
+    if (!this.screenStream) return null;
+    if (mode === "screen_camera" && !this.cameraStream) return null;
     const screenTrack = this.screenStream.getVideoTracks()[0];
     const settings = screenTrack?.getSettings();
     const width = Math.max(2, Math.round(settings?.width ?? 1920));
@@ -334,7 +364,9 @@ export class RecorderEngine {
     this.canvasCtx = ctx;
 
     this.screenVideo = await this.attachHiddenVideo(this.screenStream);
-    this.cameraVideo = await this.attachHiddenVideo(this.cameraStream);
+    if (this.cameraStream) {
+      this.cameraVideo = await this.attachHiddenVideo(this.cameraStream);
+    }
 
     this.drawCompositeFrame();
     const loop = () => {
@@ -368,33 +400,87 @@ export class RecorderEngine {
     const screenVideo = this.screenVideo;
     if (!canvas || !ctx || !screenVideo) return;
     this.lastDrawAt = performance.now();
+    const w = canvas.width;
+    const h = canvas.height;
 
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (screenVideo.readyState >= 2) {
-      ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
+    // 1. Backdrop: background wallpaper or plain black.
+    const painter =
+      this.effects.background === "none" ? undefined : BACKGROUND_PAINTERS[this.effects.background];
+    if (painter) {
+      painter(ctx, w, h);
+    } else {
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, w, h);
     }
 
+    // 2. Screen content — full-bleed normally; inset with padding, rounded
+    //    corners and a drop shadow when a background wallpaper is active.
+    //    The content rect also anchors the bubble: its normalized position is
+    //    relative to the SCREEN pixels (where the presenter dragged it), so
+    //    when the screen is inset the bubble must follow it.
+    let contentX = 0;
+    let contentY = 0;
+    let contentW = w;
+    let contentH = h;
+    if (painter) {
+      const pad = PADDING_FRACTIONS[this.effects.padding] * Math.min(w, h);
+      const sw = screenVideo.videoWidth || w;
+      const sh = screenVideo.videoHeight || h;
+      const fit = Math.min((w - pad * 2) / sw, (h - pad * 2) / sh);
+      contentW = Math.max(2, sw * fit);
+      contentH = Math.max(2, sh * fit);
+      contentX = (w - contentW) / 2;
+      contentY = (h - contentH) / 2;
+    }
+    if (screenVideo.readyState >= 2) {
+      if (painter) {
+        const radius =
+          this.effects.corners === "rounded" ? Math.max(8, Math.min(w, h) * 0.02) : 0;
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+        ctx.shadowBlur = Math.min(w, h) * 0.04;
+        ctx.shadowOffsetY = Math.min(w, h) * 0.012;
+        ctx.fillStyle = "#000000";
+        roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
+        ctx.clip();
+        ctx.drawImage(screenVideo, contentX, contentY, contentW, contentH);
+        ctx.restore();
+      } else {
+        ctx.drawImage(screenVideo, 0, 0, w, h);
+      }
+    }
+
+    // 3. Camera bubble.
     const cameraVideo = this.cameraVideo;
     if (!this.bubbleCompositing || !cameraVideo || cameraVideo.readyState < 2) return;
 
     // Bubble sizes are tuned for ~1080p output; scale up proportionally when
     // the captured screen is larger so the bubble never looks tiny on 4K.
-    const scale = Math.max(1, canvas.width / 1920);
+    const scale = Math.max(1, contentW / 1920);
     const diameter = this.bubbleSize * scale;
     const radius = diameter / 2;
-    const margin = 32 * scale;
-    const cx = this.bubbleCorner.endsWith("right")
-      ? canvas.width - margin - radius
-      : margin + radius;
-    const cy = this.bubbleCorner.startsWith("bottom")
-      ? canvas.height - margin - radius
-      : margin + radius;
+    const cx = clamp(contentX + this.bubblePosition.x * contentW, radius, w - radius);
+    const cy = clamp(contentY + this.bubblePosition.y * contentH, radius, h - radius);
+    const frame = this.effects.frame;
+
+    const clipPath = () => {
+      ctx.beginPath();
+      if (frame === "square") {
+        roundRectPath(ctx, cx - radius, cy - radius, diameter, diameter, diameter * 0.22);
+      } else {
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.closePath();
+      }
+    };
 
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.closePath();
+    clipPath();
     ctx.clip();
     const vw = cameraVideo.videoWidth || 1280;
     const vh = cameraVideo.videoHeight || 720;
@@ -412,12 +498,39 @@ export class RecorderEngine {
     );
     ctx.restore();
 
-    // White border ring.
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius - 1, 0, Math.PI * 2);
+    // Frame ring (Effects → Frames) — matches the desktop bubble styles.
+    if (frame === "none") return;
+    ctx.save();
     ctx.lineWidth = Math.max(3, 4 * scale);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+    if (frame === "gradient") {
+      const gradient = ctx.createLinearGradient(
+        cx - radius,
+        cy - radius,
+        cx + radius,
+        cy + radius,
+      );
+      gradient.addColorStop(0, FRAME_GRADIENT_STOPS[0]);
+      gradient.addColorStop(1, FRAME_GRADIENT_STOPS[1]);
+      ctx.strokeStyle = gradient;
+    } else {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+    }
+    const inset = ctx.lineWidth / 2;
+    ctx.beginPath();
+    if (frame === "square") {
+      roundRectPath(
+        ctx,
+        cx - radius + inset,
+        cy - radius + inset,
+        diameter - inset * 2,
+        diameter - inset * 2,
+        (diameter - inset * 2) * 0.22,
+      );
+    } else {
+      ctx.arc(cx, cy, radius - inset, 0, Math.PI * 2);
+    }
     ctx.stroke();
+    ctx.restore();
   }
 
   private buildMixedAudioTrack(): MediaStreamTrack | null {
@@ -538,6 +651,16 @@ export class RecorderEngine {
    * same already-acquired streams — no new permission prompts or screen picker.
    */
   restart(): void {
+    this.resetForRetake();
+    this.start();
+  }
+
+  /**
+   * Discards the current take but does NOT start recording — used when the
+   * 3-2-1 countdown should run again before the retake (desktop parity).
+   * Streams stay live; call start() when the countdown finishes.
+   */
+  resetForRetake(): void {
     if (!this.outputStream) {
       throw new Error("Streams not acquired — call acquire() before restart().");
     }
@@ -558,7 +681,6 @@ export class RecorderEngine {
     this.pausedAtMs = null;
     this.stoppedAtMs = null;
     this.totalPausedMs = 0;
-    this.start();
   }
 
   /** Abandons the recording: stops everything and drops buffered chunks. */
@@ -665,16 +787,31 @@ export class RecorderEngine {
     });
   }
 
-  /** Live-updates the composited bubble (screen_camera only). */
-  setBubble(corner: BubbleCorner, size: BubbleSize): void {
-    this.bubbleCorner = corner;
+  /**
+   * Live-moves the composited bubble — wired to the in-page bubble's drag so
+   * the recording tracks exactly where the presenter put it.
+   */
+  setBubblePosition(position: BubblePosition): void {
+    this.bubblePosition = {
+      x: clamp(position.x, 0, 1),
+      y: clamp(position.y, 0, 1),
+    };
+  }
+
+  /** Live-resizes the composited bubble (S/M/L on the bubble's hover pill). */
+  setBubbleSize(size: BubbleSize): void {
     this.bubbleSize = size;
+  }
+
+  /** Live-updates effects; backgrounds only apply if a canvas was built. */
+  setEffects(effects: RecorderEffects): void {
+    this.effects = effects;
   }
 
   /**
    * Enables/disables drawing the camera bubble into the composite. Disabled
-   * when the floating self-view window is burned into the screen capture
-   * itself, so the recording shows exactly one bubble.
+   * when the in-page bubble is burned into the screen capture itself, so the
+   * recording shows exactly one bubble.
    */
   setBubbleCompositing(enabled: boolean): void {
     this.bubbleCompositing = enabled;
@@ -682,5 +819,26 @@ export class RecorderEngine {
 
   get isBubbleCompositing(): boolean {
     return this.bubbleCompositing;
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+/** ctx.roundRect with a rect fallback for engines that lack it. */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void {
+  ctx.beginPath();
+  if (radius > 0 && typeof ctx.roundRect === "function") {
+    ctx.roundRect(x, y, w, h, radius);
+  } else {
+    ctx.rect(x, y, w, h);
   }
 }

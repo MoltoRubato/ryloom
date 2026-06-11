@@ -9,7 +9,9 @@ import {
   Mic,
   MicOff,
   Monitor,
+  NotebookPen,
   PictureInPicture2,
+  Sparkles,
   Timer,
   Video,
   Volume2,
@@ -32,6 +34,7 @@ import {
   type BubbleSize,
   type RecordingMode,
 } from "@/lib/recorder/engine";
+import { type RecorderEffects } from "@/lib/recorder/effects";
 import { type PlanLimits } from "@/lib/plans";
 import { cn } from "@/lib/utils";
 
@@ -46,6 +49,7 @@ export type RecorderSettings = {
   bubbleCorner: BubbleCorner;
   bubbleSize: BubbleSize;
   countdownEnabled: boolean;
+  effects: RecorderEffects;
 };
 
 const MODES: Array<{
@@ -71,7 +75,7 @@ const CORNERS: Array<{ id: BubbleCorner; label: string }> = [
   { id: "bottom-right", label: "Bottom right" },
 ];
 
-const SIZE_LABELS: Record<BubbleSize, string> = { 160: "S", 220: "M", 280: "L" };
+const SIZE_LABELS: Record<BubbleSize, string> = { 160: "S", 220: "M", 320: "L" };
 
 /**
  * Pre-recording setup: mode cards, device pickers with live previews,
@@ -83,6 +87,9 @@ export function SetupPanel({
   plan,
   workspaceId,
   starting,
+  notesOpen,
+  onOpenEffects,
+  onToggleNotes,
   onStart,
 }: {
   settings: RecorderSettings;
@@ -90,6 +97,9 @@ export function SetupPanel({
   plan: PlanLimits | null;
   workspaceId: string | null;
   starting: boolean;
+  notesOpen: boolean;
+  onOpenEffects: () => void;
+  onToggleNotes: () => void;
   onStart: () => void;
 }) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -486,6 +496,31 @@ export function SetupPanel({
             checked={settings.countdownEnabled}
             onCheckedChange={(checked) => onChange({ countdownEnabled: checked })}
           />
+        </div>
+
+        {/* Effects + speaker notes (desktop-app feature row) */}
+        <div className="grid grid-cols-2 gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            className="relative h-11 gap-2"
+            onClick={onOpenEffects}
+          >
+            <Sparkles className="h-4 w-4 text-muted-foreground" />
+            Effects
+            {settings.effects.background !== "none" && (
+              <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-primary" />
+            )}
+          </Button>
+          <Button
+            type="button"
+            variant={notesOpen ? "secondary" : "outline"}
+            className="h-11 gap-2"
+            onClick={onToggleNotes}
+          >
+            <NotebookPen className="h-4 w-4 text-muted-foreground" />
+            Notes
+          </Button>
         </div>
 
         {/* Plan banner */}
