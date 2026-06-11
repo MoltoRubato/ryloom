@@ -409,7 +409,7 @@ export const videos = pgTable(
     // Primary share token — every video gets one; extra links live in video_shares.
     shareToken: text("share_token")
       .notNull()
-      .default(sql`encode(gen_random_bytes(12), 'hex')`),
+      .default(sql`encode(extensions.gen_random_bytes(12), 'hex')`),
     durationMs: integer("duration_ms"),
     width: integer("width"),
     height: integer("height"),
@@ -517,7 +517,7 @@ export const videoShares = pgTable(
       .references(() => videos.id, { onDelete: "cascade" }),
     token: text("token")
       .notNull()
-      .default(sql`encode(gen_random_bytes(12), 'hex')`),
+      .default(sql`encode(extensions.gen_random_bytes(12), 'hex')`),
     label: text("label"),
     privacyType: videoPrivacyEnum("privacy_type").notNull().default("public"),
     passwordHash: text("password_hash"),

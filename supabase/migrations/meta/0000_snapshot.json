@@ -2198,7 +2198,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "encode(gen_random_bytes(12), 'hex')"
+          "default": "encode(extensions.gen_random_bytes(12), 'hex')"
         },
         "label": {
           "name": "label",
@@ -2429,7 +2429,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "encode(gen_random_bytes(12), 'hex')"
+          "default": "encode(extensions.gen_random_bytes(12), 'hex')"
         },
         "duration_ms": {
           "name": "duration_ms",

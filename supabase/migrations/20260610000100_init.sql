@@ -251,7 +251,7 @@ CREATE TABLE "video_permissions" (
 CREATE TABLE "video_shares" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"video_id" uuid NOT NULL,
-	"token" text DEFAULT encode(gen_random_bytes(12), 'hex') NOT NULL,
+	"token" text DEFAULT encode(extensions.gen_random_bytes(12), 'hex') NOT NULL,
 	"label" text,
 	"privacy_type" "video_privacy" DEFAULT 'public' NOT NULL,
 	"password_hash" text,
@@ -278,7 +278,7 @@ CREATE TABLE "videos" (
 	"status" "video_status" DEFAULT 'draft' NOT NULL,
 	"privacy" "video_privacy" DEFAULT 'private' NOT NULL,
 	"password_hash" text,
-	"share_token" text DEFAULT encode(gen_random_bytes(12), 'hex') NOT NULL,
+	"share_token" text DEFAULT encode(extensions.gen_random_bytes(12), 'hex') NOT NULL,
 	"duration_ms" integer,
 	"width" integer,
 	"height" integer,

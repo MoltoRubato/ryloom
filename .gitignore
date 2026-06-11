@@ -47,3 +47,6 @@ extension/dist/
 # python
 __pycache__/
 *.pyc
+
+# agent skills (installed locally via `npx skills add`)
+.agents/
