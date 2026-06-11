@@ -45,6 +45,19 @@ export async function r2SignedGetUrl(key: string, ttlSeconds: number): Promise<s
   return signed.url;
 }
 
+/**
+ * HEADs an object. Multipart objects only materialize when the upload is
+ * completed, so existence doubles as proof that every part landed.
+ */
+export async function r2ObjectExists(key: string): Promise<boolean> {
+  const res = await r2().fetch(objectUrl(key), { method: "HEAD" });
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    throw new Error(`R2 HEAD ${key} failed (${res.status})`);
+  }
+  return true;
+}
+
 /** Fetches a small text object (HLS playlists). Returns null when missing. */
 export async function r2GetText(key: string): Promise<string | null> {
   const res = await r2().fetch(objectUrl(key));
