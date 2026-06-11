@@ -30,15 +30,22 @@ export function CameraBubble({
   // smaller laptop screens; the recorded bubble keeps the configured size.
   const diameter = Math.min(size, 200);
 
+  // The <video> only exists once a position has been computed (the component
+  // renders null until then), so this effect must also re-run on that flip —
+  // with [stream] alone it would fire before the element mounts and the
+  // bubble would stay black.
+  const mounted = position !== null;
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.srcObject = stream;
-    if (stream) void video.play().catch(() => undefined);
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+      if (stream) void video.play().catch(() => undefined);
+    }
     return () => {
       video.srcObject = null;
     };
-  }, [stream]);
+  }, [stream, mounted]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

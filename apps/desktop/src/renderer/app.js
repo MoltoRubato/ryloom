@@ -42,7 +42,9 @@ const openExternal = (url) => invoke("open-external", url);
 // State
 // ---------------------------------------------------------------------------
 
-const DEFAULT_APP_URL = "http://localhost:3000";
+// Production by default so a fresh install connects out of the box;
+// self-hosters/devs point elsewhere via Settings (gear icon).
+const DEFAULT_APP_URL = "https://ryloom-web.vercel.app";
 const UPLOAD_CONCURRENCY = 3; // R2 multipart parts uploaded in parallel
 const UPLOAD_RETRY_DELAYS_MS = [1000, 3000, 5000, 10000];
 

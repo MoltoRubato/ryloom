@@ -27,7 +27,7 @@ const {
 const path = require("path");
 const fs = require("fs");
 
-const DEFAULT_APP_URL = "http://localhost:3000";
+const DEFAULT_APP_URL = "https://ryloom-web.vercel.app";
 
 let mainWindow = null;
 let bubbleWindow = null;
