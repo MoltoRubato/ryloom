@@ -1,16 +1,23 @@
 # Deploying Ryloom (step by step)
 
-Ryloom has three deployable pieces and one buildable artifact:
+Ryloom has four deployable pieces and one buildable artifact:
 
 | Piece | What it is | Where it runs |
 |---|---|---|
-| **Supabase project** | Auth, Postgres, file storage | supabase.com (managed) |
+| **Supabase project** | Auth, Postgres, small public assets (thumbnails, captions, avatars) | supabase.com (managed, free tier OK) |
+| **Cloudflare R2 bucket** | All video bytes — raw recordings + processed MP4/HLS | cloudflare.com (free tier: 10 GB, zero egress fees) |
 | **Web app** (`apps/web`) | Dashboard, share pages, API | Vercel |
-| **Worker** (`apps/worker`) | FFmpeg + AI processing | Any Docker host (Railway/Fly/Render) |
+| **Worker** (`apps/worker`) | FFmpeg + AI processing | Google Cloud Run Jobs (recommended, free tier) — or Modal / any Docker host |
 | **Desktop app** (`apps/desktop`) | The macOS recorder | Built once, shared with the team |
 
-Total time: roughly 30–45 minutes. Do the steps in order — each one verifies
+Total time: roughly 40–60 minutes. Do the steps in order — each one verifies
 before the next begins.
+
+> **Why R2 for video?** Supabase Storage's free tier caps uploads at 50 MB
+> (≈50 seconds of recording) and egress at 5 GB/month (≈50 video views). R2
+> has no practical file-size limit and **zero egress fees** — playback
+> bandwidth is free forever. Supabase stays for what it's great at: auth,
+> Postgres, and small public files.
 
 > **Access control:** Ryloom is locked to `@lyratechnologies.com.au` accounts
 > by default (the `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN` env var). Anyone else who
@@ -39,11 +46,16 @@ cd ryloom
 pnpm install
 ```
 
-Accounts you'll need: [supabase.com](https://supabase.com) (free tier works for
-testing; Pro recommended for real usage because of storage limits),
-[vercel.com](https://vercel.com), and one of [railway.app](https://railway.app) /
-[fly.io](https://fly.io) for the worker. An [OpenAI API key](https://platform.openai.com/api-keys)
-powers transcription + AI features.
+Accounts you'll need: [supabase.com](https://supabase.com) (free tier works),
+[dash.cloudflare.com](https://dash.cloudflare.com) (free — for R2),
+[vercel.com](https://vercel.com), and a
+[Google Cloud](https://console.cloud.google.com) account for the worker
+(Cloud Run's always-free tier; also install the
+[gcloud CLI](https://cloud.google.com/sdk/docs/install) —
+`brew install google-cloud-sdk`). An AI key powers transcription + summaries:
+[Gemini](https://aistudio.google.com/apikey) (free tier) or an
+[OpenAI API key](https://platform.openai.com/api-keys) (pay-as-you-go, better
+word-level timestamps).
 
 ---
 
@@ -67,11 +79,12 @@ supabase link --project-ref <YOUR_PROJECT_REF>   # ref = the id in your project 
 supabase db push     # applies all files in supabase/migrations/ in order
 ```
 
-This creates the 25+ tables, row-level-security policies, the 7 storage
-buckets, the `auth.users → profiles` trigger, job-queue notifications, and
-full-text search. **Verify:** in the dashboard, *Table Editor* should show
-`videos`, `workspaces`, `processing_jobs`, etc., and *Storage* should show
-`raw-recordings`, `processed-videos`, `thumbnails`, and 4 more buckets.
+This creates the 25+ tables, row-level-security policies, 5 storage buckets
+(small assets only — video lives in R2), the `auth.users → profiles` trigger,
+job-queue notifications, and full-text search. **Verify:** in the dashboard,
+*Table Editor* should show `videos`, `workspaces`, `processing_jobs`, etc.,
+and *Storage* should show `thumbnails`, `captions`, `avatars`,
+`workspace-assets`, and `exports`.
 
 ### 1.3 Collect your keys
 
@@ -84,8 +97,13 @@ Project Settings → **API**:
 Project Settings → **Database** → *Connection string*:
 
 - **Transaction pooler** (port `6543`) → `DATABASE_URL` (used by the web app)
-- **Session pooler / Direct** (port `5432`) → `WORKER_DATABASE_URL` (used by the
-  worker — it needs LISTEN/NOTIFY, which the transaction pooler doesn't support)
+- **Session pooler** (port `5432`, host `*.pooler.supabase.com`) →
+  `WORKER_DATABASE_URL` (used by the worker)
+
+> ⚠️ For the worker, use the **session pooler** string — *not* the "direct
+> connection" `db.<ref>.supabase.co` host. The direct host is IPv6-only on
+> the free tier and unreachable from Modal and most container hosts. The
+> session pooler is IPv4 everywhere and supports LISTEN/NOTIFY.
 
 Substitute your database password into both strings.
 
@@ -118,9 +136,66 @@ Authentication → **URL Configuration**:
 
 ---
 
-## Step 2 — Web app on Vercel (10 min)
+## Step 2 — Cloudflare R2 (10 min)
 
-1. Push this repo to GitHub (see Step 6 if not done yet) and **Import** it at
+All video bytes — raw recordings and processed MP4/HLS — live in one private
+R2 bucket. Uploads go straight from the browser/desktop app to R2 via
+presigned URLs; playback streams from R2 via presigned URLs. Nothing heavy
+ever transits Vercel.
+
+### 2.1 Create the bucket
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **R2 Object Storage**
+   → *Create bucket*. (First time: R2 asks you to add a payment method, but
+   the free tier — 10 GB storage, zero egress — applies automatically and
+   there is no charge until you exceed it.)
+2. Name: `ryloom-media` (or anything — it becomes `R2_BUCKET`). Location:
+   *Automatic* is fine; pick the hint closest to your team.
+
+### 2.2 Create an API token
+
+1. R2 → **Manage API tokens** (under "Account details" on the right) →
+   *Create API token*.
+2. Permissions: **Object Read & Write**, scoped to *Apply to specific buckets
+   only* → `ryloom-media`.
+3. Copy the three values shown once:
+   - **Access Key ID** → `R2_ACCESS_KEY_ID`
+   - **Secret Access Key** → `R2_SECRET_ACCESS_KEY`
+   - Your **Account ID** (shown on the R2 overview page, also in the endpoint
+     URL) → `R2_ACCOUNT_ID`
+
+### 2.3 Configure CORS (required — uploads fail without it)
+
+Bucket → **Settings** → **CORS policy** → *Add CORS policy*, paste:
+
+```json
+[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["GET", "PUT"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+- `ExposeHeaders: ["ETag"]` is **mandatory** — the uploader reads each part's
+  ETag to complete the multipart upload; without it every upload fails with
+  a CORS error.
+- `AllowedOrigins: ["*"]` is needed because the desktop app runs from a
+  `file://` origin. This is safe: every URL is presigned and expires — the
+  signature, not CORS, is the security boundary. (You can tighten it to your
+  web domain if you only use the browser recorder.)
+
+**Verify:** nothing to run yet — the first recording in Step 3's verify
+exercises the whole path.
+
+---
+
+## Step 3 — Web app on Vercel (10 min)
+
+1. Push this repo to GitHub and **Import** it at
    [vercel.com/new](https://vercel.com/new).
 2. **Root Directory**: click *Edit* and set it to `apps/web`. Vercel detects
    Next.js + the pnpm workspace automatically. Leave build settings default.
@@ -131,14 +206,18 @@ Authentication → **URL Configuration**:
    | `NEXT_PUBLIC_SUPABASE_URL` | from step 1.3 |
    | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | from step 1.3 |
    | `SUPABASE_SERVICE_ROLE_KEY` | from step 1.3 |
-   | `DATABASE_URL` | pooled string, port **6543** |
+   | `DATABASE_URL` | transaction pooler string, port **6543** |
+   | `R2_ACCOUNT_ID` | from step 2.2 |
+   | `R2_ACCESS_KEY_ID` | from step 2.2 |
+   | `R2_SECRET_ACCESS_KEY` | from step 2.2 |
+   | `R2_BUCKET` | `ryloom-media` |
    | `NEXT_PUBLIC_APP_URL` | `https://<your-vercel-domain>` |
    | `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN` | `lyratechnologies.com.au` |
    | `IP_HASH_SALT` | any long random string (`openssl rand -hex 24`) |
    | `RESEND_API_KEY` | *(optional)* for invite/comment emails |
    | `EMAIL_FROM` | *(optional)* e.g. `Ryloom <ryloom@lyratechnologies.com.au>` |
-   | `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` | *(add later, step 4)* |
-   | `WORKER_WAKE_URL` / `WORKER_WAKE_TOKEN` | *(optional, from step 3 if using Modal)* |
+   | `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` | *(add later, step 5)* |
+   | `GCP_SA_KEY`, `CLOUD_RUN_PROJECT`, `CLOUD_RUN_REGION`, `CLOUD_RUN_JOB`, `WORKER_BACKSTOP_TOKEN` | *(from step 4 — add then redeploy)* |
 
 4. **Deploy.** When it's live:
    - go back to Supabase → Authentication → URL Configuration and set **Site
@@ -148,104 +227,176 @@ Authentication → **URL Configuration**:
 **Verify:** open the production URL → you should see the landing page. Sign in
 with your `@lyratechnologies.com.au` Google account → onboarding → create a
 workspace → you land in the library. Record a short test clip at `/record` —
-it will sit on "Processing…" because the worker isn't running yet. That's
-expected; continue.
+the upload should complete (that's R2 + CORS working), then it will sit on
+"Processing…" because the worker isn't running yet. That's expected; continue.
 
 ---
 
-## Step 3 — Worker (10 min)
+## Step 4 — Worker on Google Cloud Run Jobs (15 min)
 
 The worker runs FFmpeg + AI jobs from the database queue — no inbound
-networking required. It supports two modes:
+networking required. On Cloud Run Jobs it's fully serverless: a container
+boots, drains the queue, and exits. Two things start it:
 
-- **Continuous** (default): runs 24/7 and polls — for Railway/Fly/any Docker box.
-- **Drain** (`WORKER_DRAIN=true`): wakes up, processes everything queued, exits —
-  built for **Modal's** scale-to-zero free tier.
+- **Instant wake**: the web app starts a job execution (`jobs.run`) the
+  moment an upload finishes — recordings begin processing within seconds.
+- **Backstop**: Cloud Scheduler pings `/api/worker-backstop` on the web app
+  every 3 minutes; the app checks the queue with one SQL query and only
+  starts the job when there's actually work.
+
+> Why the indirection? Cloud Run Jobs bill a **1-minute minimum per
+> execution** — pointing a blind cron at the job itself would boot a billed
+> container ~480 times a day just to find an empty queue, burning the whole
+> free tier. The web app's SQL check costs nothing, so idle cost stays $0.
+> (Concurrent executions are harmless — the queue uses `FOR UPDATE SKIP
+> LOCKED` — and the app debounces bursts.)
 
 ### Pick an AI key first (either one)
 
 | Key | Where to get it | What you get |
 |---|---|---|
 | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — **free tier** | Transcription + all AI features. Word timing is approximate, so filler-word removal is best-effort. |
-| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) — pay-as-you-go | Whisper transcription with word-level timestamps → precise filler-word removal. |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) — pay-as-you-go | Whisper transcription with word-level timestamps → precise filler-word removal. ≈$0.36/hour of video. |
 
 Set one (or both — OpenAI wins for transcription when both are present).
 Without either, videos still process fully; only transcripts/AI features no-op.
 
-Common environment variables:
+### 4.1 Google Cloud project (3 min)
+
+```bash
+gcloud auth login
+gcloud projects create ryloom-prod-$RANDOM   # or reuse an existing project
+gcloud config set project <THE_PROJECT_ID>
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com cloudscheduler.googleapis.com
+```
+
+Link a billing account in the console (Billing → Link) — required to run
+anything, but the Cloud Run always-free tier applies automatically and a
+small team stays inside it (see Cost notes).
+
+Pick a region near your Supabase project and set shell vars for the
+commands below:
+
+```bash
+REGION=australia-southeast1            # e.g. Sydney
+PROJECT=$(gcloud config get-value project)
+```
+
+### 4.2 Build and push the image (from the repo root)
+
+```bash
+gcloud artifacts repositories create ryloom --repository-format=docker --location=$REGION
+IMAGE="$REGION-docker.pkg.dev/$PROJECT/ryloom/worker:latest"
+gcloud builds submit --config cloudbuild.yaml --substitutions _IMAGE="$IMAGE"
+```
+
+(Alternative without Cloud Build — e.g. on Apple Silicon, note the platform
+flag: `gcloud auth configure-docker $REGION-docker.pkg.dev` then
+`docker buildx build --platform linux/amd64 -f apps/worker/Dockerfile -t "$IMAGE" --push .`)
+
+### 4.3 Create the job
+
+```bash
+cat > /tmp/worker-env.yaml <<'EOF'
+WORKER_DRAIN: "true"
+DRAIN_IDLE_EXIT_SECONDS: "5"
+# Stop claiming new jobs 20 min before --task-timeout so in-flight encodes
+# finish cleanly instead of being killed mid-job.
+DRAIN_MAX_RUNTIME_SECONDS: "6000"
+WORKER_CONCURRENCY: "2"
+WORKER_DATABASE_URL: "postgresql://postgres.YOUR-PROJECT:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres"
+SUPABASE_URL: "https://YOUR-PROJECT.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY: "eyJ..."
+R2_ACCOUNT_ID: "..."
+R2_ACCESS_KEY_ID: "..."
+R2_SECRET_ACCESS_KEY: "..."
+R2_BUCKET: "ryloom-media"
+GEMINI_API_KEY: "AIza..."
+EOF
+
+gcloud run jobs create ryloom-worker \
+  --image "$IMAGE" --region "$REGION" \
+  --cpu 2 --memory 4Gi --task-timeout 7200 --max-retries 1 \
+  --env-vars-file /tmp/worker-env.yaml
+
+rm /tmp/worker-env.yaml
+```
+
+> `WORKER_DATABASE_URL` must be the **session pooler** string from step 1.3
+> (`*.pooler.supabase.com:5432`) — the direct `db.*.supabase.co` host is
+> IPv6-only on the free tier and unreachable from Cloud Run.
+
+Test it end-to-end now:
+
+```bash
+gcloud run jobs execute ryloom-worker --region "$REGION" --wait
+```
+
+Your stuck recording from step 3 should flip to ready (thumbnail appears,
+video plays, transcript + AI summary populate shortly after).
+
+Ship a new worker version later with:
+`gcloud builds submit --config cloudbuild.yaml --substitutions _IMAGE="$IMAGE" && gcloud run jobs update ryloom-worker --image "$IMAGE" --region "$REGION"`.
+
+### 4.4 Instant wake from the web app
+
+Create a service account that can do exactly one thing — start this job:
+
+```bash
+gcloud iam service-accounts create ryloom-invoker
+gcloud run jobs add-iam-policy-binding ryloom-worker --region "$REGION" \
+  --member "serviceAccount:ryloom-invoker@$PROJECT.iam.gserviceaccount.com" \
+  --role roles/run.invoker
+gcloud iam service-accounts keys create ryloom-invoker.json \
+  --iam-account "ryloom-invoker@$PROJECT.iam.gserviceaccount.com"
+base64 -i ryloom-invoker.json    # copy the output
+```
+
+Add to Vercel (then redeploy the web app):
 
 | Name | Value |
 |---|---|
-| `WORKER_DATABASE_URL` | direct string, port **5432** |
-| `SUPABASE_URL` | same as `NEXT_PUBLIC_SUPABASE_URL` |
-| `SUPABASE_SERVICE_ROLE_KEY` | from step 1.3 |
-| `GEMINI_API_KEY` *or* `OPENAI_API_KEY` | see table above |
-| `AI_MODEL` | optional (defaults: `gemini-2.5-flash` / `gpt-4o-mini`) |
-| `WORKER_CONCURRENCY` | `2` (raise on bigger machines) |
+| `GCP_SA_KEY` | the base64 output above |
+| `CLOUD_RUN_PROJECT` | `$PROJECT` |
+| `CLOUD_RUN_REGION` | `$REGION` |
+| `CLOUD_RUN_JOB` | `ryloom-worker` |
+| `WORKER_BACKSTOP_TOKEN` | `openssl rand -hex 24` |
 
-### Option A — Modal (free tier, recommended on no budget)
+Then delete the local key file: `rm ryloom-invoker.json`.
 
-Modal's Starter plan includes ~$30/month of compute, billed per second with
-scale-to-zero — the drain-mode worker typically uses cents per recorded hour.
+### 4.5 Backstop schedule
 
 ```bash
-pip install modal
-modal setup                      # one-time browser auth
-
-# Secrets (one secret bundle named exactly "ryloom-worker"):
-modal secret create ryloom-worker \
-  WORKER_DATABASE_URL='postgresql://...:5432/postgres' \
-  SUPABASE_URL='https://YOUR-PROJECT.supabase.co' \
-  SUPABASE_SERVICE_ROLE_KEY='eyJ...' \
-  GEMINI_API_KEY='AIza...' \
-  WAKE_TOKEN='any-random-string'
-
-# Deploy (from the repo root):
-modal deploy apps/worker/modal_app.py
+gcloud scheduler jobs create http ryloom-backstop --location "$REGION" \
+  --schedule "*/3 * * * *" \
+  --uri "https://<your-production-domain>/api/worker-backstop" \
+  --http-method POST \
+  --headers "x-backstop-token=<your WORKER_BACKSTOP_TOKEN value>"
 ```
 
-The deploy prints a **wake endpoint URL**. Two things happen now:
+This covers missed wakes and restarts work owned by a dead container
+(stale-lock reclaim) within ~3 minutes — without ever booting the billed
+worker on an empty queue. Test it: `gcloud scheduler jobs run ryloom-backstop
+--location "$REGION"` → the endpoint returns `{"hasWork":false}` when idle.
 
-1. A scheduled function checks the queue **every minute** and drains it —
-   recordings process within ~1 minute even with no further setup.
-2. For instant pickup, copy the wake URL into Vercel as `WORKER_WAKE_URL`
-   (and your `WAKE_TOKEN` value as `WORKER_WAKE_TOKEN`), then redeploy the web
-   app — it pings Modal the moment a job is enqueued.
+**Verify the full loop:** record a clip → the share page should be playing
+within a minute or two. Executions:
+`gcloud run jobs executions list --job ryloom-worker --region "$REGION"`;
+logs are in Cloud Console → Cloud Run → Jobs → ryloom-worker → Logs.
 
-**Verify:** `modal app logs ryloom-worker` while you record a test clip.
+### Alternatives to Cloud Run
 
-### Option B — Railway
-
-1. [railway.app](https://railway.app) → New Project → **Deploy from GitHub repo**.
-2. Service settings → *Build* → **Dockerfile Path** = `apps/worker/Dockerfile`.
-3. Add the env vars above → Deploy. (~$5/mo with usage-based pricing.)
-
-### Option C — Fly.io
-
-```bash
-fly launch --no-deploy --copy-config --config apps/worker/fly.toml
-fly secrets set WORKER_DATABASE_URL='...' SUPABASE_URL='...' \
-  SUPABASE_SERVICE_ROLE_KEY='...' GEMINI_API_KEY='...'
-fly deploy --dockerfile apps/worker/Dockerfile
-```
-
-Use a `shared-cpu-2x` / 2GB+ machine for 1080p; bigger for 4K/HLS-heavy loads.
-
-### Option D — any Docker box
-
-```bash
-docker build -f apps/worker/Dockerfile -t ryloom-worker .
-docker run -d --restart unless-stopped --env-file apps/worker/.env ryloom-worker
-```
-
-**Verify:** your stuck test recording from step 2 should flip to ready within
-a minute or two (thumbnail appears, video plays, transcript + AI summary
-populate shortly after). If not, read the worker logs — almost always a wrong
-`WORKER_DATABASE_URL` (must be port 5432) or missing service-role key.
+| Option | Free? | Notes |
+|---|---|---|
+| **Modal** | $30/month credit | Still fully supported: `modal deploy apps/worker/modal_app.py` (see that file's docstring for the secret setup). It has its own built-in scout + wake endpoint — set `WORKER_WAKE_URL`/`WORKER_WAKE_TOKEN` in Vercel instead of the `GCP_*`/`CLOUD_RUN_*` vars. |
+| **Oracle Cloud Always Free VM** | 4 ARM cores / 24 GB, 24/7 | The most raw free compute; run the worker in continuous mode (`docker run`, no drain). Needs an arm64 image build, VM upkeep, and signup-capacity patience. |
+| **Any Docker box** | — | `docker build -f apps/worker/Dockerfile -t ryloom-worker . && docker run -d --restart unless-stopped --env-file apps/worker/.env ryloom-worker` |
+| Railway / Fly.io / Render | No | No meaningful free tier for background workers anymore (≈$5–7/mo). The repo keeps `fly.toml` / `railway.json` if you prefer paying for an always-on worker. |
 
 ---
 
-## Step 4 — Desktop app (10 min)
+## Step 5 — Desktop app (10 min)
 
 Build the dmg once and share it with the team:
 
@@ -258,7 +409,8 @@ open apps/desktop/dist                    # Ryloom-0.1.0-arm64.dmg etc.
 ```
 
 Because the app is unsigned (no Apple Developer account needed), first launch
-requires **right-click → Open → Open**. Each user also grants **Screen
+requires **System Settings → Privacy & Security → "Open Anyway"** on macOS 15+
+(older macOS: right-click → Open → Open). Each user also grants **Screen
 Recording** permission on first record (System Settings → Privacy & Security →
 Screen Recording → enable Ryloom, then restart the app).
 
@@ -279,14 +431,14 @@ and redeploy — the landing page's **Download for macOS** button now serves it.
 (For a private repo, the link requires GitHub login; a public bucket or Drive
 link also works.)
 
-## Step 5 — Chrome extension (optional, 2 min per person)
+## Step 6 — Chrome extension (optional, 2 min per person)
 
 `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select
 the `extension/` folder from a checkout. Open the extension's options and set
 the app URL to your production domain. `Alt+Shift+R` opens the recorder with
 the current tab pre-filled.
 
-## Step 6 — Day-2 operations
+## Step 7 — Day-2 operations
 
 - **Invite the team:** they can sign up directly (any `@lyratechnologies.com.au`
   Google account), or you can invite them by email from *Settings → Members*
@@ -297,8 +449,9 @@ the current tab pre-filled.
   All features are enabled for every workspace.
 - **Migrations later:** edit `packages/db/src/schema.ts` → `pnpm db:generate` →
   `supabase db push`.
-- **Logs:** Vercel → Functions tab for API issues; worker host logs for
-  processing issues; Supabase → Logs for auth/storage.
+- **Logs:** Vercel → Functions tab for API issues; Cloud Console → Cloud Run
+  → Jobs → ryloom-worker → Logs for processing; Supabase → Logs for auth
+  issues; Cloudflare R2 → Metrics for storage/egress.
 
 ## Troubleshooting
 
@@ -307,24 +460,34 @@ the current tab pre-filled.
 | Sign-in bounces back with "restricted to @lyratechnologies.com.au" | Working as intended — the account isn't on the company domain. To change the domain (or disable), set `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN` (use `*` to disable) and redeploy. |
 | Google sign-in error `redirect_uri_mismatch` | The redirect URI in Google Cloud must be exactly `https://<PROJECT_REF>.supabase.co/auth/v1/callback`. |
 | After sign-in, redirected to localhost | Supabase → Auth → URL Configuration → Site URL is still localhost. |
-| Upload fails immediately | Storage buckets missing → re-run `supabase db push`; or file exceeds the bucket's 10 GB cap. |
-| Stuck on "Processing…" forever | Worker not running / can't reach DB. Check worker logs (`modal app logs ryloom-worker` on Modal); `WORKER_DATABASE_URL` must be the **direct** (5432) string. |
-| Transcript/AI missing | Neither `GEMINI_API_KEY` nor `OPENAI_API_KEY` set on the worker (videos still work; AI features no-op). |
+| Upload fails immediately with a CORS/network error | The R2 bucket has no CORS policy, or `ExposeHeaders` is missing `ETag` — re-do step 2.3 exactly. |
+| Upload fails with "Could not prepare the upload" | Wrong `R2_*` env values on Vercel (account id, key pair, or bucket name). |
+| Stuck on "Processing…" for more than ~3 minutes | Worker can't run or can't connect. Check `gcloud run jobs executions list --job ryloom-worker --region <region>` + the job's logs in Cloud Console. `WORKER_DATABASE_URL` must be the **session pooler** (`*.pooler.supabase.com:5432`) string — the direct host doesn't resolve from Cloud Run. Also confirm the job's env has all the `R2_*` values, the `GCP_*`/`CLOUD_RUN_*` vars are set on Vercel, and the backstop scheduler exists (`gcloud scheduler jobs run ryloom-backstop --location <region>` to test). |
+| Video plays but transcript/AI never appears | Neither `GEMINI_API_KEY` nor `OPENAI_API_KEY` set on the worker (videos still work; AI features no-op) — or the AI provider is rate-limiting; the video stays watchable and the job retries. |
 | Filler-word removal says "unavailable" | Transcription ran via Gemini (no word-level timestamps). Use an OpenAI key for Whisper if you need precise filler edits. |
 | Desktop app: black recording | macOS Screen Recording permission not granted — System Settings → Privacy & Security → Screen Recording → enable Ryloom → relaunch. |
-| Desktop app won't open ("unidentified developer") | Unsigned build: right-click the app → Open → Open. |
+| Desktop app won't open ("unidentified developer") | Unsigned build: System Settings → Privacy & Security → "Open Anyway" (macOS 15+), or right-click → Open on older macOS. |
 | Emails not sending | `RESEND_API_KEY`/`EMAIL_FROM` unset — invites still work via copyable links. |
 
 ## Cost notes
 
-Running on $0 is viable for a trial: **Vercel Hobby** (free) + **Supabase Free**
-+ **Modal Starter** (~$30/mo included compute) + **Gemini free tier**.
+The whole stack runs on **$0/month** for an internal team:
 
-- **Supabase Free** caps storage at 1 GB (≈15–30 min of HD video) and uploads
-  at 50 MB — the first thing you'll outgrow; **Pro ($25/mo)** gives 100 GB.
-- **Vercel Hobby** works; Pro if you want team members on the dashboard.
-- **Worker**: free on Modal's included credits at small-team volume
-  (per-second billing, scale-to-zero); or ~$5–10/mo continuous on Railway/Fly.
+- **Cloudflare R2**: 10 GB-month storage free, then $0.015/GB-month. **Egress
+  is always free** — video playback bandwidth costs nothing at any scale.
+  10 GB ≈ 1.5–3 hours of stored recordings (raw + processed + HLS); a busy
+  team might spend $1–3/month.
+- **Supabase Free**: plenty for auth + database + thumbnails/captions. The
+  5 GB/month egress only carries small assets now. Upgrade triggers: 500 MB
+  database (heavy analytics/comments volume) → Pro $25/mo.
+- **Cloud Run Jobs**: the always-free instance-based tier (240,000 vCPU-s +
+  450,000 GiB-s/month) buys ~30 hours of 2-vCPU/4-GiB transcode time per
+  month, and idle cost is **$0** — executions only start when the queue has
+  work. Overage is ≈$0.20–0.30 per transcode-hour, so even a heavy month is
+  a few dollars. Cloud Scheduler's first 3 jobs are free (we use 1, and it
+  pings Vercel, not the billed container).
+- **Vercel Hobby**: fine for an internal tool dashboard. Pro if you want team
+  members in the Vercel dashboard itself.
 - **AI**: Gemini AI Studio free tier covers transcription + summaries for a
   small team (daily request caps apply). OpenAI alternative: Whisper ≈
   $0.006/min of video; `gpt-4o-mini` summaries are fractions of a cent.

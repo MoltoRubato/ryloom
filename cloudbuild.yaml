@@ -1,0 +1,10 @@
+# Builds the worker image for Cloud Run Jobs (monorepo-root build context).
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions _IMAGE=REGION-docker.pkg.dev/PROJECT/ryloom/worker:latest
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-f", "apps/worker/Dockerfile", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+options:
+  logging: CLOUD_LOGGING_ONLY

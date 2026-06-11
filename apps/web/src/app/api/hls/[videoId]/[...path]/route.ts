@@ -4,8 +4,8 @@ import { z } from "zod";
 import { videos } from "@ryloom/db";
 
 import { verifyPlaybackToken } from "@/lib/playback-token";
+import { r2GetText } from "@/lib/r2";
 import { BUCKETS, createSignedUrl } from "@/lib/storage";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { db } from "@/server/db";
 
 /**
@@ -77,14 +77,15 @@ export async function GET(
   const filename = path[path.length - 1] ?? "";
 
   if (filename.endsWith(".m3u8")) {
-    const supabase = createAdminClient();
-    const { data, error } = await supabase.storage
-      .from(BUCKETS.processed)
-      .download(objectPath);
-    if (error || !data) {
+    let playlist: string | null = null;
+    try {
+      playlist = await r2GetText(objectPath);
+    } catch {
+      playlist = null;
+    }
+    if (playlist === null) {
       return new Response("Not found", { status: 404 });
     }
-    const playlist = await data.text();
     return new Response(rewritePlaylist(playlist, token), {
       status: 200,
       headers: {

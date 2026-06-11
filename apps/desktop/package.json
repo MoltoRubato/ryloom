@@ -13,8 +13,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.50.0",
     "@trpc/client": "^11.4.2",
-    "superjson": "^2.2.2",
-    "tus-js-client": "^4.3.1"
+    "superjson": "^2.2.2"
   },
   "devDependencies": {
     "electron": "^33.0.0",

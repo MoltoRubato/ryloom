@@ -16,10 +16,19 @@ import { runStitchJob } from "./jobs/stitch";
 import { runTranscodeJob } from "./jobs/transcode";
 import { runTranscribeJob } from "./jobs/transcribe";
 import { runTrimJob } from "./jobs/trim";
-import { claimJob, completeJob, failJob, type ClaimedJob, type JobType } from "./queue";
+import {
+  claimJob,
+  completeJob,
+  failJob,
+  heartbeatJob,
+  sweepExpiredJobs,
+  type ClaimedJob,
+  type JobType,
+} from "./queue";
 
 const IDLE_POLL_MS = 3_000;
 const RETENTION_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h
+const HEARTBEAT_INTERVAL_MS = 60_000; // refresh the job lease (see STALE_LOCK_MINUTES)
 
 const workerId = `worker-${os.hostname()}-${process.pid}`;
 
@@ -61,18 +70,29 @@ async function processJob(job: ClaimedJob): Promise<void> {
 
   const startedAt = Date.now();
   log(`job ${job.id} (${job.type}, attempt ${job.attempts}/${job.maxAttempts}) started`);
+  // Lease heartbeat: keeps locked_at fresh so other workers don't reclaim a
+  // long-running job; stops the moment this process dies, expiring the lease.
+  const heartbeat = setInterval(() => {
+    void heartbeatJob(job.id, workerId).catch(() => undefined);
+  }, HEARTBEAT_INTERVAL_MS);
   try {
     const output = await handler(job);
-    await completeJob(job.id, output);
-    log(`job ${job.id} (${job.type}) completed in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    const kept = await completeJob(job.id, workerId, output);
+    if (kept) {
+      log(`job ${job.id} (${job.type}) completed in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    } else {
+      log(`job ${job.id} (${job.type}): lease lost mid-run (reclaimed by another worker) — result discarded`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log(`job ${job.id} (${job.type}) failed after ${((Date.now() - startedAt) / 1000).toFixed(1)}s: ${message.split("\n")[0] ?? message}`);
     try {
-      await failJob(job, error);
+      await failJob(job, error, workerId);
     } catch (failError) {
       log(`job ${job.id}: failJob bookkeeping also failed: ${String(failError)}`);
     }
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
@@ -112,10 +132,16 @@ function waitForWakeOrTimeout(ms: number): Promise<void> {
 let activeSlots = 0;
 let lastActivityAt = Date.now();
 let jobsProcessed = 0;
+/** Drain-mode soft deadline: past this, slots stop claiming new jobs. */
+let stopClaimingAt: number | null = null;
 
 async function slotLoop(slot: number): Promise<void> {
   log(`slot ${slot} started`);
   while (!shuttingDown) {
+    if (stopClaimingAt !== null && Date.now() >= stopClaimingAt) {
+      log(`slot ${slot}: max runtime reached — no new claims, letting in-flight work finish`);
+      break;
+    }
     let job: ClaimedJob | null = null;
     try {
       job = await claimJob(workerId);
@@ -211,12 +237,27 @@ async function main(): Promise<void> {
     }
   }
 
+  // Fail expired 'running' jobs that are out of attempts (dead-worker
+  // leftovers); claimJob reclaims expired jobs that still have attempts.
+  await sweepExpiredJobs().catch((error) => {
+    log(`expired-job sweep failed: ${String(error)}`);
+  });
+
   await ensureRetentionSweepQueued(env.WORKER_DRAIN);
   let retentionTimer: NodeJS.Timeout | null = null;
+  let expiredSweepTimer: NodeJS.Timeout | null = null;
   if (!env.WORKER_DRAIN) {
     retentionTimer = setInterval(() => {
       void ensureRetentionSweepQueued();
     }, RETENTION_INTERVAL_MS);
+    // Continuous mode boots once, so the boot-time expired-job sweep alone
+    // would miss later strandings — re-run it periodically.
+    expiredSweepTimer = setInterval(() => {
+      void sweepExpiredJobs().catch(() => undefined);
+    }, 10 * 60 * 1000);
+  }
+  if (env.WORKER_DRAIN && env.DRAIN_MAX_RUNTIME_SECONDS) {
+    stopClaimingAt = startedAt + env.DRAIN_MAX_RUNTIME_SECONDS * 1000;
   }
 
   const slots: Promise<void>[] = [];
@@ -229,6 +270,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log(`${signal} received — finishing in-flight jobs, claiming no new work`);
     if (retentionTimer) clearInterval(retentionTimer);
+    if (expiredSweepTimer) clearInterval(expiredSweepTimer);
     wake();
     await Promise.allSettled(slots);
     if (listener) {

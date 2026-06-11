@@ -1,9 +1,10 @@
--- Storage buckets. Names must stay in sync with apps/web/src/lib/storage.ts.
+-- Storage buckets for small assets. Names must stay in sync with
+-- apps/web/src/lib/storage.ts. Video bytes (raw-recordings,
+-- processed-videos) live in Cloudflare R2, not Supabase Storage — uploads go
+-- direct-to-R2 via presigned multipart URLs issued by recording.startUpload.
 
 insert into storage.buckets (id, name, public, file_size_limit)
 values
-  ('raw-recordings',   'raw-recordings',   false, 10737418240), -- 10 GB
-  ('processed-videos', 'processed-videos', false, 10737418240),
   ('thumbnails',       'thumbnails',       true,  20971520),
   ('captions',         'captions',         true,  20971520),
   ('avatars',          'avatars',          true,  10485760),
@@ -27,28 +28,6 @@ as $$
       and wm.workspace_id::text = (storage.foldername(object_name))[2]
   );
 $$;
-
--- raw-recordings: workspace members upload recordings directly (TUS).
--- TUS upserts need insert + update + select.
-drop policy if exists "raw upload insert" on storage.objects;
-create policy "raw upload insert" on storage.objects
-  for insert to authenticated
-  with check (
-    bucket_id = 'raw-recordings'
-    and (storage.foldername(name))[1] = 'workspaces'
-    and public.is_workspace_member_of_path(name)
-  );
-
-drop policy if exists "raw upload update" on storage.objects;
-create policy "raw upload update" on storage.objects
-  for update to authenticated
-  using (bucket_id = 'raw-recordings' and public.is_workspace_member_of_path(name))
-  with check (bucket_id = 'raw-recordings' and public.is_workspace_member_of_path(name));
-
-drop policy if exists "raw upload select" on storage.objects;
-create policy "raw upload select" on storage.objects
-  for select to authenticated
-  using (bucket_id = 'raw-recordings' and public.is_workspace_member_of_path(name));
 
 -- thumbnails: members may upload custom thumbnails under their workspace prefix.
 drop policy if exists "thumbnails member write" on storage.objects;
@@ -106,4 +85,4 @@ create policy "workspace assets member update" on storage.objects
   using (bucket_id = 'workspace-assets' and public.is_workspace_member_of_path(name))
   with check (bucket_id = 'workspace-assets' and public.is_workspace_member_of_path(name));
 
--- processed-videos, captions (writes), exports: service-role only (no policies).
+-- captions (writes), exports: service-role only (no policies).

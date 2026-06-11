@@ -17,11 +17,23 @@ export const env = createEnv({
       .string()
       .optional()
       .transform((v) => v === "true"),
-    // Optional: serverless-worker wake-up webhook (e.g. the Modal endpoint).
-    // When set, the app pings it after enqueueing a processing job so a
-    // scale-to-zero worker starts immediately instead of on its next tick.
+    // Worker wake — Cloud Run Jobs (recommended): service-account key
+    // (raw JSON or base64) with roles/run.invoker on the worker job, plus the
+    // job coordinates. The app starts an execution the moment work is queued.
+    GCP_SA_KEY: z.string().optional(),
+    CLOUD_RUN_PROJECT: z.string().optional(),
+    CLOUD_RUN_REGION: z.string().optional(),
+    CLOUD_RUN_JOB: z.string().optional(),
+    // Shared secret for /api/worker-backstop (Cloud Scheduler's fallback ping).
+    WORKER_BACKSTOP_TOKEN: z.string().optional(),
+    // Alternative wake backend: a plain webhook (e.g. the Modal endpoint).
     WORKER_WAKE_URL: z.string().url().optional(),
     WORKER_WAKE_TOKEN: z.string().optional(),
+    // Cloudflare R2 (S3 API) — the video media plane (raw + processed bytes).
+    R2_ACCOUNT_ID: z.string().min(1),
+    R2_ACCESS_KEY_ID: z.string().min(1),
+    R2_SECRET_ACCESS_KEY: z.string().min(1),
+    R2_BUCKET: z.string().min(1).default("ryloom-media"),
   },
   client: {
     NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
@@ -45,8 +57,17 @@ export const env = createEnv({
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     EMAIL_FROM: process.env.EMAIL_FROM,
     SCIM_ENABLED: process.env.SCIM_ENABLED,
+    GCP_SA_KEY: process.env.GCP_SA_KEY,
+    CLOUD_RUN_PROJECT: process.env.CLOUD_RUN_PROJECT,
+    CLOUD_RUN_REGION: process.env.CLOUD_RUN_REGION,
+    CLOUD_RUN_JOB: process.env.CLOUD_RUN_JOB,
+    WORKER_BACKSTOP_TOKEN: process.env.WORKER_BACKSTOP_TOKEN,
     WORKER_WAKE_URL: process.env.WORKER_WAKE_URL,
     WORKER_WAKE_TOKEN: process.env.WORKER_WAKE_TOKEN,
+    R2_ACCOUNT_ID: process.env.R2_ACCOUNT_ID,
+    R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
+    R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
+    R2_BUCKET: process.env.R2_BUCKET,
     NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,

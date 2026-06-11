@@ -18,6 +18,11 @@ const envSchema = z.object({
     .url("SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) must be a valid URL"),
   /** Service-role key — the worker bypasses RLS for storage + db writes. */
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, "SUPABASE_SERVICE_ROLE_KEY is required"),
+  /** Cloudflare R2 (S3 API) — raw + processed video bytes live here. */
+  R2_ACCOUNT_ID: z.string().min(1, "R2_ACCOUNT_ID is required"),
+  R2_ACCESS_KEY_ID: z.string().min(1, "R2_ACCESS_KEY_ID is required"),
+  R2_SECRET_ACCESS_KEY: z.string().min(1, "R2_SECRET_ACCESS_KEY is required"),
+  R2_BUCKET: z.string().min(1).default("ryloom-media"),
   /** Optional — preferred provider for transcription (Whisper) + AI generation. */
   OPENAI_API_KEY: z.string().min(1).optional(),
   /** Optional — Google AI Studio key, used when no OpenAI key is set. */
@@ -41,12 +46,23 @@ const envSchema = z.object({
     .transform((v) => v === "true"),
   /** Seconds all slots must stay idle before a drain-mode worker exits. */
   DRAIN_IDLE_EXIT_SECONDS: z.coerce.number().int().min(1).default(10),
+  /**
+   * Optional drain-mode soft deadline: stop claiming NEW jobs this many
+   * seconds after boot, letting in-flight work finish before the platform's
+   * hard task timeout kills the container mid-job. Set it ~10-20 minutes
+   * below the host timeout (Cloud Run --task-timeout / Modal timeout).
+   */
+  DRAIN_MAX_RUNTIME_SECONDS: z.coerce.number().int().min(60).optional(),
 });
 
 const parsed = envSchema.safeParse({
   DATABASE_URL: process.env.WORKER_DATABASE_URL ?? process.env.DATABASE_URL,
   SUPABASE_URL: process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  R2_ACCOUNT_ID: process.env.R2_ACCOUNT_ID,
+  R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
+  R2_BUCKET: process.env.R2_BUCKET ? process.env.R2_BUCKET : undefined,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY : undefined,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY : undefined,
   AI_MODEL: process.env.AI_MODEL ? process.env.AI_MODEL : undefined,
@@ -57,6 +73,9 @@ const parsed = envSchema.safeParse({
   WORKER_DRAIN: process.env.WORKER_DRAIN ? process.env.WORKER_DRAIN : undefined,
   DRAIN_IDLE_EXIT_SECONDS: process.env.DRAIN_IDLE_EXIT_SECONDS
     ? process.env.DRAIN_IDLE_EXIT_SECONDS
+    : undefined,
+  DRAIN_MAX_RUNTIME_SECONDS: process.env.DRAIN_MAX_RUNTIME_SECONDS
+    ? process.env.DRAIN_MAX_RUNTIME_SECONDS
     : undefined,
 });
 

@@ -23,7 +23,6 @@ import { extensionForMimeType } from "@/lib/recorder/engine";
 import { probeVideoBlob } from "@/lib/recorder/probe";
 import { clear as clearRecovery } from "@/lib/recorder/recovery";
 import { uploadRecording, type UploadHandle } from "@/lib/recorder/upload";
-import { createClient } from "@/lib/supabase/client";
 import { formatBytes, formatDuration, slugify } from "@/lib/utils";
 import { api } from "@/trpc/react";
 
@@ -42,8 +41,8 @@ type BlobMeta = {
 };
 
 /**
- * Post-recording review: playback, title, metadata, TUS upload with progress
- * + cancel + retry, download a local copy, or discard.
+ * Post-recording review: playback, title, metadata, direct-to-R2 multipart
+ * upload with progress + cancel + retry, download a local copy, or discard.
  */
 export function PreviewPanel({
   blob,
@@ -69,6 +68,9 @@ export function PreviewPanel({
   onDiscard: () => void;
 }) {
   const completeSession = api.recording.completeSession.useMutation();
+  const startUploadMutation = api.recording.startUpload.useMutation();
+  const completeUploadMutation = api.recording.completeUpload.useMutation();
+  const abortUploadMutation = api.recording.abortUpload.useMutation();
   const updateVideo = api.video.update.useMutation();
 
   const [phase, setPhase] = useState<UploadPhase>({ kind: "idle" });
@@ -79,6 +81,9 @@ export function PreviewPanel({
   const titleRef = useRef(title);
   titleRef.current = title;
   const handleRef = useRef<UploadHandle | null>(null);
+  const uploadIdRef = useRef<string | null>(null);
+  /** Bumped by cancel/retry so awaited steps of a superseded attempt bail out. */
+  const attemptRef = useRef(0);
 
   const objectUrl = useMemo(() => URL.createObjectURL(blob), [blob]);
   useEffect(() => {
@@ -163,43 +168,92 @@ export function PreviewPanel({
     }
   };
 
+  const abortServerUpload = (uploadId: string) => {
+    void abortUploadMutation
+      .mutateAsync({ sessionId: session.sessionId, uploadId })
+      .catch(() => undefined);
+  };
+
   const startUpload = async () => {
     if (busy) return;
+    const attempt = ++attemptRef.current;
+    const isStale = () => attemptRef.current !== attempt;
     setPhase({ kind: "uploading", percent: 0 });
 
-    let accessToken: string | undefined;
+    // A retry supersedes any earlier attempt — kill its workers and abort its
+    // multipart upload so incomplete parts don't linger until R2's cleanup.
+    const staleHandle = handleRef.current;
+    handleRef.current = null;
+    if (staleHandle) void staleHandle.abort().catch(() => undefined);
+    const staleUploadId = uploadIdRef.current;
+    uploadIdRef.current = null;
+    if (staleUploadId) abortServerUpload(staleUploadId);
+
+    // Fresh presigned part URLs every attempt — retries never reuse stale URLs.
+    let target;
     try {
-      const supabase = createClient();
-      const { data } = await supabase.auth.getSession();
-      accessToken = data.session?.access_token;
-    } catch {
-      accessToken = undefined;
-    }
-    if (!accessToken) {
+      target = await startUploadMutation.mutateAsync({
+        sessionId: session.sessionId,
+        sizeBytes: blob.size,
+      });
+    } catch (error) {
+      if (isStale()) return;
       setPhase({
         kind: "error",
-        message: "Your sign-in session has expired. Refresh the page and try again.",
+        message:
+          error instanceof Error && error.message
+            ? error.message
+            : "Could not prepare the upload. Check your connection and retry.",
       });
       return;
     }
+    if (isStale()) {
+      // Canceled while the RPC was in flight — don't start uploading.
+      abortServerUpload(target.uploadId);
+      return;
+    }
+    uploadIdRef.current = target.uploadId;
 
     const handle = uploadRecording({
       blob,
-      bucket: session.bucket,
-      uploadPath: session.uploadPath,
-      tusEndpoint: session.tusEndpoint,
-      mimeType: session.mimeType || blob.type || "video/webm",
-      accessToken,
+      target,
       onProgress: (percent) => {
         setPhase((current) =>
           current.kind === "uploading" ? { kind: "uploading", percent } : current,
         );
       },
-      onSuccess: () => {
+      onSuccess: (parts) => {
         handleRef.current = null;
-        void finalize();
+        void (async () => {
+          if (isStale()) {
+            abortServerUpload(target.uploadId);
+            return;
+          }
+          try {
+            await completeUploadMutation.mutateAsync({
+              sessionId: session.sessionId,
+              uploadId: target.uploadId,
+              parts,
+            });
+          } catch (error) {
+            if (isStale()) return;
+            setPhase({
+              kind: "error",
+              message:
+                error instanceof Error && error.message
+                  ? error.message
+                  : "The upload finished but couldn't be confirmed. Retry to try again.",
+            });
+            return;
+          }
+          if (isStale()) return;
+          uploadIdRef.current = null;
+          void finalize();
+        })();
       },
       onError: (error) => {
+        handleRef.current = null;
+        if (isStale()) return;
         setPhase({
           kind: "error",
           message: error.message || "The upload failed. Check your connection and retry.",
@@ -211,9 +265,13 @@ export function PreviewPanel({
   };
 
   const cancelUpload = () => {
+    attemptRef.current += 1;
     const handle = handleRef.current;
     handleRef.current = null;
     if (handle) void handle.abort().catch(() => undefined);
+    const uploadId = uploadIdRef.current;
+    uploadIdRef.current = null;
+    if (uploadId) abortServerUpload(uploadId);
     setPhase({ kind: "idle" });
     toast.info("Upload canceled — your recording is still here.");
   };

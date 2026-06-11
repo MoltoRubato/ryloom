@@ -6,14 +6,14 @@
  *                                  ↘ permission (macOS privacy instructions)
  *
  * Talks to the web app over tRPC (Authorization: Bearer <supabase access
- * token>) and uploads recordings straight to Supabase Storage with TUS.
+ * token>) and uploads recordings straight to Cloudflare R2 via presigned
+ * multipart URLs from recording.startUpload.
  */
 "use strict";
 
 const { ipcRenderer } = require("electron");
 const { createClient } = require("@supabase/supabase-js");
 const { createTRPCClient, httpBatchLink } = require("@trpc/client");
-const tus = require("tus-js-client");
 const { Recorder } = require("./recorder.js");
 
 // superjson 2.x is ESM-only; fall back to a wire-compatible CJS shim.
@@ -43,7 +43,8 @@ const openExternal = (url) => invoke("open-external", url);
 // ---------------------------------------------------------------------------
 
 const DEFAULT_APP_URL = "http://localhost:3000";
-const TUS_CHUNK_SIZE = 6 * 1024 * 1024; // Supabase requires exactly 6MB chunks
+const UPLOAD_CONCURRENCY = 3; // R2 multipart parts uploaded in parallel
+const UPLOAD_RETRY_DELAYS_MS = [1000, 3000, 5000, 10000];
 
 const state = {
   view: "loading",
@@ -68,7 +69,7 @@ const state = {
   blob: null,
   durationMs: 0,
   dims: null,
-  tusUpload: null,
+  upload: null, // in-flight multipart upload handle { aborted, xhrs }
   uploadDone: false,
   completePending: false,
   countdownTimer: null,
@@ -883,8 +884,132 @@ async function safeCancelSession() {
 }
 
 // ---------------------------------------------------------------------------
-// Upload (TUS → Supabase Storage, per docs/CONTEXT.md contract)
+// Upload (direct-to-R2 multipart via presigned URLs from recording.startUpload)
 // ---------------------------------------------------------------------------
+
+function putPartXhr(handle, url, body, onPartProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    handle.xhrs.add(xhr);
+    xhr.open("PUT", url);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onPartProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      handle.xhrs.delete(xhr);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = xhr.getResponseHeader("ETag");
+        if (!etag) {
+          reject(new Error("R2 did not expose the ETag header — check the bucket's CORS ExposeHeaders"));
+          return;
+        }
+        onPartProgress(body.size);
+        resolve(etag);
+      } else {
+        reject(new Error(`part upload failed with HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => {
+      handle.xhrs.delete(xhr);
+      reject(new Error("network error"));
+    };
+    xhr.onabort = () => {
+      handle.xhrs.delete(xhr);
+      reject(new Error("upload aborted"));
+    };
+    xhr.send(body);
+  });
+}
+
+async function runMultipartUpload(handle, blob, active) {
+  // Fresh presigned URLs on every attempt — retry never reuses stale ones.
+  const target = await getTrpc().recording.startUpload.mutate({
+    sessionId: active.sessionId,
+    sizeBytes: blob.size,
+  });
+  const partCount = target.urls.length;
+  const progress = new Array(partCount).fill(0);
+
+  const report = () => {
+    const sent = progress.reduce((a, b) => a + b, 0);
+    const pct = blob.size > 0 ? Math.min(100, Math.round((sent / blob.size) * 100)) : 0;
+    $("progress-fill").style.width = `${pct}%`;
+    $("progress-pct").textContent = `${pct}%`;
+    $("progress-bytes").textContent = `${formatBytes(sent)} / ${formatBytes(blob.size)}`;
+  };
+
+  const uploadPart = async (index) => {
+    const start = index * target.partSize;
+    const body = blob.slice(start, Math.min(start + target.partSize, blob.size));
+    let lastError = new Error("upload failed");
+    for (let attempt = 0; attempt <= UPLOAD_RETRY_DELAYS_MS.length; attempt++) {
+      if (handle.aborted || handle.failed) throw new Error("upload aborted");
+      try {
+        const etag = await putPartXhr(handle, target.urls[index], body, (loaded) => {
+          progress[index] = Math.min(loaded, body.size);
+          report();
+        });
+        return { partNumber: index + 1, etag };
+      } catch (err) {
+        lastError = err;
+        // No point retrying a deterministic CORS misconfiguration.
+        if (handle.aborted || handle.failed || String(err && err.message).includes("ETag header")) {
+          throw err;
+        }
+        progress[index] = 0;
+        report();
+        const delay = UPLOAD_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    throw lastError;
+  };
+
+  const parts = new Array(partCount);
+  let nextIndex = 0;
+  const workers = [];
+  for (let w = 0; w < Math.min(UPLOAD_CONCURRENCY, partCount); w++) {
+    workers.push(
+      (async () => {
+        for (;;) {
+          const index = nextIndex++;
+          if (index >= partCount) return;
+          parts[index] = await uploadPart(index);
+        }
+      })(),
+    );
+  }
+  try {
+    await Promise.all(workers);
+  } catch (err) {
+    // Stop the sibling workers' in-flight PUTs, then abort server-side so
+    // incomplete parts don't linger (retry starts fresh). `failed`, not
+    // `aborted` — the caller's catch must still show the error banner.
+    handle.failed = true;
+    for (const xhr of handle.xhrs) xhr.abort();
+    handle.xhrs.clear();
+    getTrpc()
+      .recording.abortUpload.mutate({ sessionId: active.sessionId, uploadId: target.uploadId })
+      .catch(() => undefined);
+    throw err;
+  }
+
+  try {
+    await getTrpc().recording.completeUpload.mutate({
+      sessionId: active.sessionId,
+      uploadId: target.uploadId,
+      parts,
+    });
+  } catch (err) {
+    // Retry re-uploads from scratch — abort this fully-uploaded MPU so its
+    // parts don't sit in R2 until lifecycle cleanup.
+    getTrpc()
+      .recording.abortUpload.mutate({ sessionId: active.sessionId, uploadId: target.uploadId })
+      .catch(() => undefined);
+    throw err;
+  }
+}
 
 function startUpload() {
   const { blob, active } = state;
@@ -894,47 +1019,24 @@ function startUpload() {
   $("upload-error-actions").hidden = true;
   $("upload-title").textContent = "Uploading…";
 
-  const upload = new tus.Upload(blob, {
-    endpoint: active.tusEndpoint,
-    retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
-    chunkSize: TUS_CHUNK_SIZE,
-    headers: {
-      authorization: `Bearer ${state.session ? state.session.access_token : ""}`,
-      "x-upsert": "true",
-    },
-    metadata: {
-      bucketName: active.bucket,
-      objectName: active.uploadPath,
-      contentType: active.mimeType,
-      cacheControl: "3600",
-    },
-    uploadDataDuringCreation: true,
-    removeFingerprintOnSuccess: true,
-    onProgress: (uploaded, total) => {
-      const pct = total > 0 ? Math.min(100, Math.round((uploaded / total) * 100)) : 0;
-      $("progress-fill").style.width = `${pct}%`;
-      $("progress-pct").textContent = `${pct}%`;
-      $("progress-bytes").textContent = `${formatBytes(uploaded)} / ${formatBytes(total)}`;
-    },
-    onError: (err) => {
+  const handle = { aborted: false, failed: false, xhrs: new Set() };
+  state.upload = handle;
+
+  runMultipartUpload(handle, blob, active)
+    .then(() => {
+      state.upload = null;
+      finalizeUpload();
+    })
+    .catch((err) => {
+      state.upload = null;
+      if (handle.aborted) return;
       setBanner(
         "upload-error",
         `Upload failed: ${errorMessage(err, "network error")}. Your recording is safe in memory — retry, or save it locally.`,
       );
       $("upload-error-actions").hidden = false;
       $("upload-title").textContent = "Upload interrupted";
-    },
-    onSuccess: () => {
-      finalizeUpload();
-    },
-  });
-
-  state.tusUpload = upload;
-  // Resume a previous attempt of this same upload when possible.
-  upload.findPreviousUploads().then((previous) => {
-    if (previous.length > 0) upload.resumeFromPreviousUpload(previous[0]);
-    upload.start();
-  });
+    });
 }
 
 async function finalizeUpload() {
@@ -978,14 +1080,8 @@ function retryUpload() {
     finalizeUpload();
     return;
   }
-  if (state.tusUpload) {
-    setBanner("upload-error", null);
-    $("upload-error-actions").hidden = true;
-    $("upload-title").textContent = "Uploading…";
-    state.tusUpload.start(); // tus resumes from the last committed chunk
-  } else {
-    startUpload();
-  }
+  // Fresh multipart attempt with newly signed URLs (handles expiry too).
+  startUpload();
 }
 
 function saveLocalCopy() {
@@ -1006,7 +1102,7 @@ function saveLocalCopy() {
 function resetForNewRecording() {
   state.blob = null;
   state.active = null;
-  state.tusUpload = null;
+  state.upload = null;
   state.uploadDone = false;
   state.durationMs = 0;
   state.dims = null;

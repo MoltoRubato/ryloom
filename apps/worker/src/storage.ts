@@ -7,14 +7,21 @@ import { pipeline } from "node:stream/promises";
 import { createClient } from "@supabase/supabase-js";
 
 import { env } from "./env";
+import { r2DownloadToFile, r2UploadFile } from "./r2";
 
-/** Bucket names — must stay in sync with supabase/migrations + apps/web/src/lib/storage.ts */
+/** Bucket names — must stay in sync with apps/web/src/lib/storage.ts */
 export const BUCKETS = {
   raw: "raw-recordings",
   processed: "processed-videos",
   thumbnails: "thumbnails",
   captions: "captions",
 } as const;
+
+/**
+ * raw + processed video bytes live in Cloudflare R2 (single bucket, same
+ * object keys); thumbnails + captions stay in public Supabase buckets.
+ */
+const R2_BUCKETS: ReadonlySet<string> = new Set([BUCKETS.raw, BUCKETS.processed]);
 
 /** Storage path builders — mirror apps/web/src/lib/storage.ts `storagePaths`. */
 export const storagePaths = {
@@ -44,6 +51,10 @@ export async function downloadToFile(
   storagePath: string,
   destFile: string,
 ): Promise<void> {
+  if (R2_BUCKETS.has(bucket)) {
+    await r2DownloadToFile(storagePath, destFile);
+    return;
+  }
   const { data, error } = await supabase.storage.from(bucket).download(storagePath);
   if (error || !data) {
     throw new Error(
@@ -66,6 +77,11 @@ export async function uploadFile(
   contentType: string,
   upsert = true,
 ): Promise<void> {
+  if (R2_BUCKETS.has(bucket)) {
+    // R2 PUTs always overwrite; chunked upload keeps memory bounded.
+    await r2UploadFile(storagePath, localFile, contentType);
+    return;
+  }
   const body = await fs.readFile(localFile);
   const { error } = await supabase.storage.from(bucket).upload(storagePath, body, {
     contentType,

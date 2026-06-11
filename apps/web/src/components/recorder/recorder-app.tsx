@@ -62,7 +62,7 @@ function defaultRecordingTitle(): string {
  * The /record orchestrator. Owns the phase machine
  * (setup → starting → countdown → recording → stopping → preview), the
  * RecorderEngine instance, crash-recovery bookkeeping and the handoff to the
- * TUS upload in the preview panel.
+ * multipart R2 upload in the preview panel.
  */
 export function RecorderApp() {
   const router = useRouter();
@@ -105,6 +105,7 @@ export function RecorderApp() {
   const workspaceDetail = api.workspace.get.useQuery(workspaceId ? { workspaceId } : skipToken);
   const plan = workspaceDetail.data?.plan ?? null;
 
+  const utils = api.useUtils();
   const createSession = api.recording.createSession.useMutation();
   const cancelSession = api.recording.cancelSession.useMutation();
   // Stable across renders (unlike the mutation result objects) — safe to use
@@ -308,7 +309,6 @@ export function RecorderApp() {
         title: titleRef.current,
         bucket: active.bucket,
         uploadPath: active.uploadPath,
-        tusEndpoint: active.tusEndpoint,
       }).catch(() => undefined);
 
       setCameraPreview(engine.cameraPreviewStream);
@@ -360,7 +360,6 @@ export function RecorderApp() {
         videoId: created.videoId,
         bucket: created.bucket,
         uploadPath: created.uploadPath,
-        tusEndpoint: created.tusEndpoint,
         mimeType,
         maxRecordingMinutes: created.limits.maxRecordingMinutes,
       };
@@ -444,7 +443,6 @@ export function RecorderApp() {
         title: titleRef.current,
         bucket: active.bucket,
         uploadPath: active.uploadPath,
-        tusEndpoint: active.tusEndpoint,
       }).catch(() => undefined);
       warnedRef.current = false;
       engine.restart();
@@ -535,21 +533,45 @@ export function RecorderApp() {
           return;
         }
 
+        // Check the server-side session before reusing it: a stale recovery
+        // entry may belong to a session that already completed (tab crashed
+        // after completeSession but before clearRecovery) or was canceled —
+        // startUpload rejects both, which would dead-end the preview panel.
+        let reusable = false;
+        if (rec.bucket && rec.uploadPath) {
+          try {
+            const server = await utils.recording.getSession.fetch({
+              sessionId: rec.sessionId,
+            });
+            if (server.status === "completed") {
+              await clearRecovery(rec.sessionId).catch(() => undefined);
+              setRecoverySessions((current) =>
+                current.filter((s) => s.sessionId !== rec.sessionId),
+              );
+              toast.info("That recording already uploaded — opening it.");
+              router.push(`/app/video/${server.videoId ?? rec.videoId}`);
+              return;
+            }
+            reusable = server.status !== "canceled";
+          } catch {
+            reusable = false;
+          }
+        }
+
         let active: ActiveSession;
-        if (rec.bucket && rec.uploadPath && rec.tusEndpoint) {
+        if (reusable && rec.bucket && rec.uploadPath) {
           active = {
             sessionId: rec.sessionId,
             videoId: rec.videoId,
             bucket: rec.bucket,
             uploadPath: rec.uploadPath,
-            tusEndpoint: rec.tusEndpoint,
             mimeType: rec.mimeType,
             maxRecordingMinutes: null,
           };
           extraRecoveryKeyRef.current = null;
         } else {
-          // Older recovery entries without an upload target: mint a fresh
-          // session and retire the orphaned one.
+          // No reusable server session (legacy entry, canceled, or gone):
+          // mint a fresh one and retire the orphan.
           const created = await createSessionAsync({
             workspaceId: rec.workspaceId,
             mode: "screen",
@@ -563,7 +585,6 @@ export function RecorderApp() {
             videoId: created.videoId,
             bucket: created.bucket,
             uploadPath: created.uploadPath,
-            tusEndpoint: created.tusEndpoint,
             mimeType: rec.mimeType,
             maxRecordingMinutes: created.limits.maxRecordingMinutes,
           };
@@ -582,7 +603,7 @@ export function RecorderApp() {
         setRecoveryBusy(false);
       }
     },
-    [createSessionAsync, cancelSessionAsync, discardRecovered],
+    [createSessionAsync, cancelSessionAsync, discardRecovered, utils, router],
   );
 
   // --- File upload ("or upload a video file") -----------------------------------------
@@ -608,7 +629,6 @@ export function RecorderApp() {
           videoId: created.videoId,
           bucket: created.bucket,
           uploadPath: created.uploadPath,
-          tusEndpoint: created.tusEndpoint,
           mimeType,
           maxRecordingMinutes: created.limits.maxRecordingMinutes,
         };

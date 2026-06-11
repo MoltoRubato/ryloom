@@ -1,16 +1,14 @@
 import "server-only";
 
+import { r2DeletePrefix, r2SignedGetUrl } from "@/lib/r2";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
- * Storage buckets. Created by supabase/migrations — keep names in sync.
- * - raw-recordings:    private; TUS resumable uploads land here
- * - processed-videos:  private; worker writes MP4/HLS renditions
- * - thumbnails:        public read
- * - captions:          public read
- * - avatars:           public read
- * - workspace-assets:  public read (logos, branding)
- * - exports:           private (CSV/data exports)
+ * Storage layout — two backends, routed by logical bucket:
+ * - raw-recordings, processed-videos → Cloudflare R2 (one private bucket,
+ *   zero egress; object keys are identical to the paths below)
+ * - thumbnails, captions, avatars, workspace-assets, exports → Supabase
+ *   Storage (small assets; buckets created by supabase/migrations)
  */
 export const BUCKETS = {
   raw: "raw-recordings",
@@ -21,6 +19,13 @@ export const BUCKETS = {
   workspaceAssets: "workspace-assets",
   exports: "exports",
 } as const;
+
+/** Logical buckets whose bytes live in R2 (video media plane). */
+const R2_BUCKETS: ReadonlySet<string> = new Set([BUCKETS.raw, BUCKETS.processed]);
+
+export function isR2Bucket(bucket: string): boolean {
+  return R2_BUCKETS.has(bucket);
+}
 
 export const storagePaths = {
   rawRecording: (workspaceId: string, videoId: string, ext = "webm") =>
@@ -44,6 +49,13 @@ export async function createSignedUrl(
   path: string,
   ttl: number = SIGNED_URL_TTL_SECONDS,
 ): Promise<string | null> {
+  if (isR2Bucket(bucket)) {
+    try {
+      return await r2SignedGetUrl(path, ttl);
+    } catch {
+      return null;
+    }
+  }
   const supabase = createAdminClient();
   const { data, error } = await supabase.storage
     .from(bucket)
@@ -52,12 +64,17 @@ export async function createSignedUrl(
   return data.signedUrl;
 }
 
+/** Public-bucket URL — Supabase-hosted assets only (thumbnails, captions…). */
 export function publicUrl(bucket: string, path: string): string {
   const supabase = createAdminClient();
   return supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
 }
 
 export async function deletePrefix(bucket: string, prefix: string): Promise<void> {
+  if (isR2Bucket(bucket)) {
+    await r2DeletePrefix(prefix);
+    return;
+  }
   const supabase = createAdminClient();
   // Supabase storage has no recursive delete; list then remove in pages.
   for (;;) {

@@ -9,7 +9,6 @@ export type ActiveSession = {
   videoId: string;
   bucket: string;
   uploadPath: string;
-  tusEndpoint: string;
   /** Container mime type used when the session was created. */
   mimeType: string;
   /** Per-recording cap from the workspace plan; null = unlimited. */

@@ -26,8 +26,8 @@ accounts (configurable via `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`).
   moment you press stop**, while the upload finishes in the background
 - Browser recorder: screen/camera/screen+camera-bubble (canvas composition),
   mic + tab audio mixing, countdown, crash recovery via IndexedDB
-- Chrome extension launcher; upload existing files; resumable TUS uploads
-  direct to storage (video bytes never touch the web server)
+- Chrome extension launcher; upload existing files; chunked multipart uploads
+  direct to Cloudflare R2 (video bytes never touch the web server)
 
 **Processing (worker)**
 - H.264 MP4 up to 4K + HLS adaptive streaming, thumbnails, animated previews, waveforms
@@ -58,7 +58,7 @@ accounts (configurable via `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`).
 ```
 apps/web        Next.js 15 (App Router, tRPC v11, Drizzle, Tailwind v4, shadcn/ui) → Vercel
 apps/desktop    Electron macOS recorder (deep-link auth, tray, camera bubble)      → dmg artifact
-apps/worker     Node 22 + FFmpeg job worker (Postgres queue, SKIP LOCKED)          → any Docker host
+apps/worker     Node 22 + FFmpeg job worker (Postgres queue, SKIP LOCKED)          → Cloud Run Jobs / any Docker host
 packages/db     Shared Drizzle schema (25+ tables)
 supabase/       SQL migrations: DDL, RLS, storage buckets, triggers, FTS
 extension/      Chrome MV3 extension (recorder launcher)
@@ -66,8 +66,10 @@ docs/           Deployment guide + team guide
 ```
 
 - **Control plane** (Vercel): auth, metadata API, dashboards, share pages.
-- **Media plane**: recorder → TUS → Supabase Storage → worker (FFmpeg) →
-  processed buckets → signed playback URLs / token-checked HLS proxy.
+- **Media plane**: recorder → presigned multipart → Cloudflare R2 → worker
+  (FFmpeg) → R2 → presigned playback URLs / token-checked HLS proxy. R2 has
+  zero egress fees, so playback bandwidth is free; Supabase keeps auth, the
+  database, and small public assets (thumbnails, captions, avatars).
 - **Queue**: `processing_jobs` with `FOR UPDATE SKIP LOCKED` + `pg_notify`. No Redis.
 - **Access control**: domain allow-list enforced in middleware, auth callbacks,
   and every authenticated API procedure; Postgres RLS as the second layer.
@@ -76,7 +78,7 @@ docs/           Deployment guide + team guide
 
 ```bash
 pnpm install
-cp .env.example apps/web/.env.local    # fill in Supabase values
+cp .env.example apps/web/.env.local    # fill in Supabase + Cloudflare R2 values
 pnpm dev                               # web on :3000
 pnpm dev:worker                        # worker (needs ffmpeg, or use Docker)
 pnpm --filter @ryloom/desktop dev      # desktop app against localhost

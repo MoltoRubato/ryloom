@@ -7,15 +7,16 @@
 > (enforced in middleware, auth callbacks, and `protectedProcedure`). Plan-gate
 > helpers (`requirePlanFeature` etc.) still exist but never block.
 
-Ryloom is a full Loom clone: record screen/camera in the browser, resumable-upload
-to Supabase Storage, process with an FFmpeg worker, share with rich privacy
-controls, watch with analytics, transcripts, comments, and AI features.
+Ryloom is a full Loom clone: record screen/camera in the browser or desktop
+app, presigned-multipart-upload direct to Cloudflare R2, process with an
+FFmpeg worker, share with rich privacy controls, watch with analytics,
+transcripts, comments, and AI features.
 
 ## Monorepo layout
 
 ```
 apps/web        Next.js 15 App Router (T3-style) — deployed on Vercel
-apps/worker     Node + FFmpeg processing worker — Docker, deployed on Fly/Railway
+apps/worker     Node + FFmpeg processing worker — Docker, deployed on Cloud Run Jobs
 packages/db     Shared Drizzle schema  (@ryloom/db)
 supabase/       SQL migrations (DDL + RLS + storage buckets)
 extension/      Chrome MV3 extension
@@ -42,7 +43,7 @@ docs/           This file + deployment docs
 - **Env**: `import { env } from "@/env"` — never `process.env` directly in app code.
   Do NOT add new env vars without also adding them to `src/env.js`.
 - **Do NOT edit** `package.json` — every dependency you need is already installed
-  (radix-ui set, lucide-react, sonner, hls.js, tus-js-client, recharts, date-fns,
+  (radix-ui set, lucide-react, sonner, hls.js, aws4fetch, recharts, date-fns,
   motion, next-themes, bcryptjs, nanoid, stripe, resend, ua-parser-js, cva, clsx,
   tailwind-merge, zod, superjson).
 - **UI primitives**: standard shadcn/ui components live in `@/components/ui/*`
@@ -157,23 +158,22 @@ change these):
 
 ## Upload contract (recorder → storage)
 
-1. `recording.createSession` → `{ sessionId, videoId, bucket, uploadPath, tusEndpoint, limits }`.
-2. Browser uploads with `tus-js-client`:
-   ```ts
-   new tus.Upload(file, {
-     endpoint: tusEndpoint, // `${SUPABASE_URL}/storage/v1/upload/resumable`
-     retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
-     chunkSize: 6 * 1024 * 1024, // Supabase requires exactly 6MB chunks
-     headers: { authorization: `Bearer ${session.access_token}`, "x-upsert": "true" },
-     metadata: { bucketName: bucket, objectName: uploadPath, contentType: mimeType, cacheControl: "3600" },
-     uploadDataDuringCreation: true, removeFingerprintOnSuccess: true,
-   })
-   ```
-   (access token from `supabase.auth.getSession()` — storage RLS allows workspace
-   members to write under `workspaces/{workspaceId}/...` in `raw-recordings`.)
-3. `recording.completeSession({ sessionId, durationMs, sizeBytes, width, height })`
+Video bytes live in Cloudflare R2 (single private bucket, S3 API); they never
+touch a Next.js route. Authorization is session ownership in tRPC, not
+storage RLS.
+
+1. `recording.createSession` → `{ sessionId, videoId, bucket, uploadPath, limits }`.
+2. `recording.startUpload({ sessionId, sizeBytes })` → `{ uploadId, partSize, urls }`
+   — opens an R2 multipart upload and presigns one PUT URL per 32MB part
+   (6h TTL). Called fresh on every attempt, so retries never reuse stale URLs.
+3. Client PUTs each `blob.slice(...)` part to its URL (3 in parallel, per-part
+   retry with backoff) and collects the `ETag` response headers — the R2
+   bucket's CORS policy must list `ETag` in `ExposeHeaders`.
+4. `recording.completeUpload({ sessionId, uploadId, parts })` — server completes
+   the multipart upload (`abortUpload` on cancel).
+5. `recording.completeSession({ sessionId, durationMs, sizeBytes, width, height })`
    → flips video to `processing`, enqueues worker pipeline.
-4. Redirect to `/app/video/[videoId]` which polls `video.getProcessingStatus`.
+6. Redirect to `/app/video/[videoId]` which polls `video.getProcessingStatus`.
 
 ## Playback contract
 

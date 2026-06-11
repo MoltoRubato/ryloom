@@ -43,3 +43,7 @@ apps/worker/tmp/
 
 # extension build artifacts
 extension/dist/
+
+# python
+__pycache__/
+*.pyc

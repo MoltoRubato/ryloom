@@ -29,7 +29,6 @@ export type RecoverySession = {
    */
   bucket?: string;
   uploadPath?: string;
-  tusEndpoint?: string;
 };
 
 type ChunkRow = {

@@ -4,7 +4,12 @@ import { z } from "zod";
 
 import { processingJobs, recordingSessions, videos } from "@ryloom/db";
 
-import { env } from "@/env";
+import {
+  r2AbortMultipartUpload,
+  r2CompleteMultipartUpload,
+  r2CreateMultipartUpload,
+  r2SignUploadPartUrl,
+} from "@/lib/r2";
 import { BUCKETS, storagePaths } from "@/lib/storage";
 import { wakeWorker } from "@/lib/wake-worker";
 import {
@@ -21,14 +26,16 @@ const MIME_EXT: Record<string, string> = {
   "audio/webm": "weba",
 };
 
+/** Multipart upload tuning: 32MB parts → 20GB cap is 640 parts (R2 max 10k). */
+const UPLOAD_PART_SIZE = 32 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
+const UPLOAD_URL_TTL_SECONDS = 60 * 60 * 6;
+
 export const recordingRouter = createTRPCRouter({
   /**
-   * Creates a video shell + recording session and returns everything the
-   * browser needs to upload directly to Supabase Storage with TUS:
-   *   tusEndpoint = `${SUPABASE_URL}/storage/v1/upload/resumable`
-   *   metadata    = { bucketName, objectName, contentType }
-   *   headers     = { authorization: `Bearer <user access token>` } (client-side)
-   * Storage RLS allows workspace members to write to their workspace prefix.
+   * Creates a video shell + recording session. The actual upload happens
+   * later via startUpload → presigned R2 multipart PUTs → completeUpload;
+   * session ownership (not storage RLS) authorizes the object key.
    */
   createSession: protectedProcedure
     .input(
@@ -114,12 +121,94 @@ export const recordingRouter = createTRPCRouter({
         shareToken: video.shareToken,
         bucket: BUCKETS.raw,
         uploadPath,
-        tusEndpoint: `${env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/upload/resumable`,
         limits: {
           maxRecordingMinutes: plan.maxRecordingMinutes,
           maxResolution: plan.maxResolution,
         },
       };
+    }),
+
+  /**
+   * Opens an R2 multipart upload for the session's raw recording and returns
+   * presigned part URLs. Ownership replaces the old storage-RLS check: only
+   * the session's creator can obtain upload URLs for its object key.
+   */
+  startUpload: protectedProcedure
+    .input(
+      z.object({
+        sessionId: z.string().uuid(),
+        sizeBytes: z.number().int().positive().max(MAX_UPLOAD_BYTES),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const session = await ctx.db.query.recordingSessions.findFirst({
+        where: eq(recordingSessions.id, input.sessionId),
+      });
+      if (!session || session.userId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Recording session not found" });
+      }
+      if (session.status === "completed" || session.status === "canceled") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This recording session is no longer accepting uploads.",
+        });
+      }
+
+      const partCount = Math.max(1, Math.ceil(input.sizeBytes / UPLOAD_PART_SIZE));
+      const uploadId = await r2CreateMultipartUpload(
+        session.uploadPath,
+        session.mimeType ?? "video/webm",
+      );
+      const urls = await Promise.all(
+        Array.from({ length: partCount }, (_, i) =>
+          r2SignUploadPartUrl(session.uploadPath, uploadId, i + 1, UPLOAD_URL_TTL_SECONDS),
+        ),
+      );
+      return { uploadId, partSize: UPLOAD_PART_SIZE, urls };
+    }),
+
+  /** Finishes the R2 multipart upload (server-side, with the parts' ETags). */
+  completeUpload: protectedProcedure
+    .input(
+      z.object({
+        sessionId: z.string().uuid(),
+        uploadId: z.string().min(1).max(2000),
+        parts: z
+          .array(
+            z.object({
+              partNumber: z.number().int().min(1).max(10000),
+              // R2 part ETags are hex (md5), optionally quoted / -suffixed.
+              // Strict shape keeps client input out of the signed S3 XML.
+              etag: z.string().regex(/^"?[A-Fa-f0-9]{16,64}(-\d{1,5})?"?$/),
+            }),
+          )
+          .min(1)
+          .max(10000),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const session = await ctx.db.query.recordingSessions.findFirst({
+        where: eq(recordingSessions.id, input.sessionId),
+      });
+      if (!session || session.userId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Recording session not found" });
+      }
+      await r2CompleteMultipartUpload(session.uploadPath, input.uploadId, input.parts);
+      return { ok: true };
+    }),
+
+  /** Best-effort abort of an in-flight multipart upload (user hit cancel). */
+  abortUpload: protectedProcedure
+    .input(z.object({ sessionId: z.string().uuid(), uploadId: z.string().min(1).max(2000) }))
+    .mutation(async ({ ctx, input }) => {
+      const session = await ctx.db.query.recordingSessions.findFirst({
+        where: eq(recordingSessions.id, input.sessionId),
+      });
+      if (!session || session.userId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Recording session not found" });
+      }
+      await r2AbortMultipartUpload(session.uploadPath, input.uploadId).catch(() => undefined);
+      return { ok: true };
     }),
 
   /** Marks the upload finished and enqueues the processing pipeline. */
