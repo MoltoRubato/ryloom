@@ -23,6 +23,7 @@
   "build": {
     "appId": "com.ryloom.desktop",
     "productName": "Ryloom",
+    "afterPack": "scripts/adhoc-sign.js",
     "files": [
       "src/**/*"
     ],
