@@ -176,7 +176,9 @@ export class RecorderEngine {
   private screenVideo: HTMLVideoElement | null = null;
   private cameraVideo: HTMLVideoElement | null = null;
   private rafId: number | null = null;
-  private hiddenDrawTimer: number | null = null;
+  /** Inline-blob worker that clocks draws while the tab is hidden. */
+  private tickWorker: Worker | null = null;
+  private tickWorkerUrl: string | null = null;
   private lastDrawAt = 0;
 
   private bubblePosition: BubblePosition;
@@ -278,7 +280,13 @@ export class RecorderEngine {
       }
       try {
         this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: 30 },
+          // Ask for 4K so HiDPI/Retina surfaces deliver physical pixels —
+          // browsers clamp to the real surface size, never upscale.
+          video: {
+            frameRate: { ideal: 30, max: 60 },
+            width: { ideal: 3840 },
+            height: { ideal: 2160 },
+          },
           audio: this.config.systemAudio,
         });
       } catch (error) {
@@ -367,8 +375,11 @@ export class RecorderEngine {
     let height: number;
     if (mode === "camera") {
       if (!this.cameraStream) return null;
-      width = 1920;
-      height = 1080;
+      // Size the frame to the real camera output — upscaling a 720p cam to
+      // 1080p only burns bitrate on blur. Snap even for the encoder.
+      const settings = this.cameraStream.getVideoTracks()[0]?.getSettings();
+      width = Math.max(2, Math.min(1920, Math.floor((settings?.width ?? 1280) / 2) * 2));
+      height = Math.max(2, Math.min(1080, Math.floor((settings?.height ?? 720) / 2) * 2));
     } else {
       // Plain screen capture stays a zero-cost raw track unless the canvas
       // backdrop needs the compositor at start.
@@ -397,6 +408,8 @@ export class RecorderEngine {
         "Canvas rendering isn't available in this browser.",
       );
     }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     this.canvas = canvas;
     this.canvasCtx = ctx;
 
@@ -411,16 +424,23 @@ export class RecorderEngine {
 
     this.drawCompositeFrame();
     const loop = () => {
-      this.drawCompositeFrame();
+      // captureStream(30) can't consume 120Hz repaints — hold rAF to ~30fps.
+      if (performance.now() - this.lastDrawAt >= 31) this.drawCompositeFrame();
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);
-    // rAF throttles (or halts) in hidden tabs — exactly where a screen
-    // recorder lives while the user works elsewhere. A timer keeps the
-    // composite alive whenever rAF goes quiet.
-    this.hiddenDrawTimer = window.setInterval(() => {
-      if (performance.now() - this.lastDrawAt > 80) this.drawCompositeFrame();
-    }, 66);
+    // rAF halts in hidden tabs and Chromium aligns page timers to >=1s —
+    // exactly where a screen recorder lives while the user works elsewhere.
+    // Dedicated-worker timers are never throttled, so a tiny inline worker
+    // clocks the composite at ~30fps; rAF stays the primary clock when the
+    // tab is visible (the 25ms guard prevents double-draws).
+    this.tickWorkerUrl = URL.createObjectURL(
+      new Blob(["setInterval(() => postMessage(0), 33);"], { type: "text/javascript" }),
+    );
+    this.tickWorker = new Worker(this.tickWorkerUrl);
+    this.tickWorker.onmessage = () => {
+      if (performance.now() - this.lastDrawAt > 25) this.drawCompositeFrame();
+    };
 
     this.canvasStream = canvas.captureStream(30);
     return this.canvasStream.getVideoTracks()[0] ?? null;
@@ -500,7 +520,19 @@ export class RecorderEngine {
           ctx.drawImage(screenVideo, contentX, contentY, contentW, contentH);
           ctx.restore();
         } else {
-          ctx.drawImage(screenVideo, 0, 0, w, h);
+          const sw = screenVideo.videoWidth || w;
+          const sh = screenVideo.videoHeight || h;
+          if (sw !== w || sh !== h) {
+            // The captured surface changed size mid-recording (window resize,
+            // display switch). The canvas can't follow — H.264/MP4 can't
+            // change resolution midstream — so letterbox, never stretch.
+            const fit = Math.min(w / sw, h / sh);
+            contentW = sw * fit;
+            contentH = sh * fit;
+            contentX = (w - contentW) / 2;
+            contentY = (h - contentH) / 2;
+          }
+          ctx.drawImage(screenVideo, contentX, contentY, contentW, contentH);
         }
       }
     } else if (!scene) {
@@ -633,16 +665,38 @@ export class RecorderEngine {
     }
     if (this.recorder) return;
 
+    // Scale the encoder bitrate to the actual output pixels — 8 Mbps is fine
+    // for 1080p but starves a 4K Retina composite.
+    const outWidth = this.canvas?.width ?? this.outputSize.width ?? 1920;
+    const outHeight = this.canvas?.height ?? this.outputSize.height ?? 1080;
+    const videoBitsPerSecond = computeVideoBitsPerSecond(outWidth, outHeight, 30);
+    const audioBitsPerSecond = 128_000;
+
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(this.outputStream, {
         mimeType: this.actualMimeType,
-        videoBitsPerSecond: 8_000_000,
-        audioBitsPerSecond: 128_000,
+        videoBitsPerSecond,
+        audioBitsPerSecond,
       });
     } catch {
       // Extremely defensive — the mime type was checked with isTypeSupported.
-      recorder = new MediaRecorder(this.outputStream);
+      // Retry keeping the bitrates (a bare constructor records at the browser
+      // default ~2.5 Mbps) before giving up on options entirely.
+      try {
+        recorder = new MediaRecorder(this.outputStream, {
+          videoBitsPerSecond,
+          audioBitsPerSecond,
+        });
+        console.warn(
+          `[recorder] mimeType "${this.actualMimeType}" rejected — recording in the browser's default container.`,
+        );
+      } catch {
+        recorder = new MediaRecorder(this.outputStream);
+        console.warn(
+          "[recorder] MediaRecorder rejected all options — recording at the browser's default bitrate.",
+        );
+      }
     }
     if (recorder.mimeType) this.actualMimeType = recorder.mimeType;
 
@@ -774,9 +828,13 @@ export class RecorderEngine {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
-    if (this.hiddenDrawTimer !== null) {
-      window.clearInterval(this.hiddenDrawTimer);
-      this.hiddenDrawTimer = null;
+    if (this.tickWorker) {
+      this.tickWorker.terminate();
+      this.tickWorker = null;
+    }
+    if (this.tickWorkerUrl) {
+      URL.revokeObjectURL(this.tickWorkerUrl);
+      this.tickWorkerUrl = null;
     }
     this.cameraProcessor?.destroy();
     this.cameraProcessor = null;
@@ -902,6 +960,11 @@ export class RecorderEngine {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+/** ~0.12 bits per pixel per frame, floored at the old 8 Mbps and capped at 32. */
+function computeVideoBitsPerSecond(width: number, height: number, fps: number): number {
+  return clamp(Math.round(width * height * fps * 0.12), 8_000_000, 32_000_000);
 }
 
 /** ctx.roundRect with a rect fallback for engines that lack it. */

@@ -32,8 +32,11 @@ const envSchema = z.object({
    * "gpt-4o-mini" (openai) / "gemini-2.5-flash" (gemini).
    */
   AI_MODEL: z.string().min(1).optional(),
-  /** Number of jobs processed concurrently. */
-  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  /**
+   * Number of jobs processed concurrently. Default 1: two x264 encodes on one
+   * box just split the cores — let a single encode use all of them.
+   */
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(1),
   /** Scratch directory for downloads + FFmpeg intermediates. */
   TMP_DIR: z.string().min(1).default(path.join(tmpdir(), "ryloom")),
   /**

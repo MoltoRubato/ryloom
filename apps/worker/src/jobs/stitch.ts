@@ -66,6 +66,7 @@ export async function runStitchJob(job: ClaimedJob): Promise<Record<string, unkn
       chainTranscribe: true,
       autoAi: true,
       notifyReady: true,
+      jobId: job.id,
     });
 
     return { ...pipelineOutput, sources: sources.length };

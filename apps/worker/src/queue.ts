@@ -20,9 +20,10 @@ export type ClaimedJob = {
  * Lease window for running jobs. processJob heartbeats locked_at every minute
  * while a handler runs, so a 'running' row whose locked_at is older than this
  * belongs to a dead worker (Modal timeout/OOM kill, preemption) and is safe
- * to reclaim. Must be comfortably larger than the heartbeat interval.
+ * to reclaim. 5 missed 60s heartbeats is conclusive. Must match the interval
+ * in apps/web/src/app/api/worker-backstop/route.ts.
  */
-export const STALE_LOCK_MINUTES = 15;
+export const STALE_LOCK_MINUTES = 5;
 
 /**
  * Atomically claims the next runnable job using FOR UPDATE SKIP LOCKED so
@@ -167,7 +168,10 @@ export async function failJob(
     });
     if (video) {
       const critical = VIDEO_CRITICAL_TYPES.has(job.type);
-      if (critical) {
+      // A video that's already 'ready' is watchable (early-ready transcode
+      // whose post-ready HLS/derived step failed) — never flip it back.
+      const flipToFailed = critical && video.status !== "ready";
+      if (flipToFailed) {
         await db
           .update(videos)
           .set({
@@ -177,15 +181,37 @@ export async function failJob(
           })
           .where(eq(videos.id, video.id));
       }
+      // A terminally-failed edit whose pendingEditRanges survived never
+      // reached the swap — clear them so players stop applying a cut that
+      // will never be flattened (post-swap failures already cleared them).
+      const isEditJob =
+        job.type === "trim" ||
+        job.type === "silence_removal" ||
+        job.type === "filler_removal";
+      const editNeverApplied = isEditJob && (video.pendingEditRanges?.length ?? 0) > 0;
+      if (editNeverApplied) {
+        await db
+          .update(videos)
+          .set({ pendingEditRanges: null, updatedAt: new Date() })
+          .where(eq(videos.id, video.id));
+      }
       await db.insert(notifications).values({
         userId: video.ownerId,
         type: "video_failed",
         workspaceId: video.workspaceId,
         videoId: video.id,
-        title: critical ? "Video processing failed" : "Transcript / AI step failed",
-        body: critical
+        title: flipToFailed
+          ? "Video processing failed"
+          : editNeverApplied
+            ? "Edit failed"
+            : critical
+              ? "Video finishing step failed"
+              : "Transcript / AI step failed",
+        body: flipToFailed
           ? `"${video.title}" could not be processed. ${job.type.replace(/_/g, " ")} failed after ${job.attempts} attempts.`
-          : `${job.type.replace(/_/g, " ")} failed for "${video.title}" after ${job.attempts} attempts — the video itself is still available.`,
+          : editNeverApplied
+            ? `The ${job.type.replace(/_/g, " ")} edit could not be applied — "${video.title}" is unchanged.`
+            : `${job.type.replace(/_/g, " ")} failed for "${video.title}" after ${job.attempts} attempts — the video itself is still available.`,
         data: { jobId: job.id, jobType: job.type },
       });
     }

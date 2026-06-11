@@ -96,7 +96,7 @@ function ffprobe(args: string[]): Promise<RunResult> {
  * `trunc(d/2)*2` keeps both dimensions even for yuv420p/libx264.
  */
 function scaleFilter(maxHeight: number): string {
-  return `scale=trunc(iw*min(1\\,${maxHeight}/ih)/2)*2:trunc(ih*min(1\\,${maxHeight}/ih)/2)*2`;
+  return `scale=trunc(iw*min(1\\,${maxHeight}/ih)/2)*2:trunc(ih*min(1\\,${maxHeight}/ih)/2)*2:flags=lanczos`;
 }
 
 /** The width/height the scale filter above will produce, computed in JS. */
@@ -122,10 +122,17 @@ export type ProbeResult = {
   height: number;
   fps: number;
   hasAudio: boolean;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  pixFmt: string | null;
+  /** ffprobe demuxer name, e.g. "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm". */
+  formatName: string;
 };
 
 type FfprobeStream = {
   codec_type?: string;
+  codec_name?: string;
+  pix_fmt?: string;
   width?: number;
   height?: number;
   r_frame_rate?: string;
@@ -135,8 +142,14 @@ type FfprobeStream = {
 
 type FfprobeOutput = {
   streams?: FfprobeStream[];
-  format?: { duration?: string };
+  format?: { duration?: string; format_name?: string };
 };
+
+/** ffprobe reports the mp4/mov demuxer as a comma list ("mov,mp4,m4a,..."). */
+export function isMp4Container(formatName: string): boolean {
+  const names = formatName.split(",");
+  return names.includes("mp4") || names.includes("mov");
+}
 
 function parseFps(stream: FfprobeStream): number {
   for (const raw of [stream.avg_frame_rate, stream.r_frame_rate]) {
@@ -185,8 +198,8 @@ export async function probe(file: string): Promise<ProbeResult> {
     durationSec = streamDur.length > 0 ? Math.max(...streamDur) : NaN;
   }
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
-    // Decode pass — slow but reliable for headerless WebM.
-    const { stderr } = await ffmpeg(["-i", file, "-f", "null", "-"]);
+    // Demux-only pass (-c copy skips decoding) — reliable for headerless WebM.
+    const { stderr } = await ffmpeg(["-i", file, "-c", "copy", "-f", "null", "-"]);
     const matches = [...stderr.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
     const last = matches[matches.length - 1];
     if (last) {
@@ -195,12 +208,17 @@ export async function probe(file: string): Promise<ProbeResult> {
   }
   if (!Number.isFinite(durationSec) || durationSec <= 0) durationSec = 0;
 
+  const audioStream = streams.find((s) => s.codec_type === "audio");
   return {
     durationMs: Math.round(durationSec * 1000),
     width: videoStream?.width ?? 0,
     height: videoStream?.height ?? 0,
     fps: videoStream ? parseFps(videoStream) : 0,
     hasAudio,
+    videoCodec: videoStream?.codec_name ?? null,
+    audioCodec: audioStream?.codec_name ?? null,
+    pixFmt: videoStream?.pix_fmt ?? null,
+    formatName: parsed.format?.format_name ?? "",
   };
 }
 
@@ -228,8 +246,10 @@ export async function transcodeMp4(params: {
     "libx264",
     "-preset",
     "veryfast",
+    // CRF 19: this MP4 is the mezzanine every later edit/ladder derives from,
+    // and screen content compresses well — the bitrate cost is small.
     "-crf",
-    "23",
+    "19",
     "-pix_fmt",
     "yuv420p",
     "-movflags",
@@ -242,6 +262,15 @@ export async function transcodeMp4(params: {
   }
   args.push(params.output);
   await ffmpeg(args);
+}
+
+/**
+ * Lossless container rewrite into a faststart MP4 — used when the source is
+ * already H.264/AAC in an mp4/mov container (Chrome 126+ MediaRecorder), so
+ * the full re-encode can be skipped entirely.
+ */
+export async function remuxMp4(input: string, output: string): Promise<void> {
+  await ffmpeg(["-i", input, "-c", "copy", "-movflags", "+faststart", output]);
 }
 
 export async function thumbnail(input: string, output: string, atMs: number): Promise<void> {
@@ -355,6 +384,7 @@ export type HlsRendition = {
 
 const LADDER_HEIGHTS = [2160, 1080, 720, 360];
 
+/** Fallback BANDWIDTH values, only used when measuring the encoded bytes fails. */
 const BANDWIDTH_BY_HEIGHT: Record<number, number> = {
   2160: 14_000_000,
   1080: 5_500_000,
@@ -363,9 +393,35 @@ const BANDWIDTH_BY_HEIGHT: Record<number, number> = {
 };
 
 /**
+ * Actual rendition bandwidth: encoded segment bytes over playlist duration,
+ * plus 15% headroom. CRF screen content lands far below the nominal table
+ * above — writing real numbers lets hls.js ABR actually climb rungs.
+ */
+async function measuredBandwidth(outDir: string, h: number): Promise<number | null> {
+  try {
+    const playlist = await fs.readFile(path.join(outDir, `${h}p.m3u8`), "utf8");
+    let durationSec = 0;
+    for (const m of playlist.matchAll(/#EXTINF:([\d.]+)/g)) durationSec += Number(m[1]);
+    let bytes = 0;
+    for (const name of await fs.readdir(outDir)) {
+      if (name.startsWith(`${h}p_`) && name.endsWith(".ts")) {
+        bytes += (await fs.stat(path.join(outDir, name))).size;
+      }
+    }
+    if (!(durationSec > 0) || bytes <= 0) return null;
+    return Math.round(((bytes * 8) / durationSec) * 1.15);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Renders an HLS ladder into outDir: one media playlist + .ts segments per
  * rendition and a master.m3u8 with BANDWIDTH/RESOLUTION entries. All URIs in
  * the playlists are relative so the web app's HLS proxy can rewrite them.
+ *
+ * All encoded rungs come from ONE ffmpeg invocation (split + per-output
+ * scale), so the input is decoded once instead of once per rendition.
  */
 export async function hlsLadder(params: {
   input: string;
@@ -374,6 +430,12 @@ export async function hlsLadder(params: {
   sourceWidth: number;
   sourceHeight: number;
   hasAudio: boolean;
+  /**
+   * Already-encoded MP4 whose streams match the source 1:1 (remux fast path).
+   * Rungs at the source height are segmented from it with -c copy — no
+   * re-encode, no generation loss.
+   */
+  copySource?: string;
 }): Promise<HlsRendition[]> {
   await fs.mkdir(params.outDir, { recursive: true });
 
@@ -384,55 +446,82 @@ export async function hlsLadder(params: {
     heights = [Math.min(params.maxHeight, Math.max(2, params.sourceHeight))];
   }
 
+  const hlsMuxArgs = (h: number) => [
+    "-f",
+    "hls",
+    "-hls_time",
+    "4",
+    "-hls_playlist_type",
+    "vod",
+    "-hls_flags",
+    "independent_segments",
+    "-hls_segment_filename",
+    path.join(params.outDir, `${h}p_%04d.ts`),
+    path.join(params.outDir, `${h}p.m3u8`),
+  ];
+
+  // heights is filtered to <= sourceHeight, so h >= sourceHeight is exactly
+  // the "top rung equals the source" case the copy fast path covers.
+  const copyHeights = params.copySource
+    ? heights.filter((h) => h >= params.sourceHeight)
+    : [];
+  const encodeHeights = heights.filter((h) => !copyHeights.includes(h));
+
+  for (const h of copyHeights) {
+    // Segment-only: -c copy cuts at the source's existing keyframes.
+    await ffmpeg(["-i", params.copySource!, "-c", "copy", ...hlsMuxArgs(h)]);
+  }
+
+  if (encodeHeights.length > 0) {
+    const chains: string[] = [];
+    if (encodeHeights.length === 1) {
+      chains.push(`[0:v]${scaleFilter(encodeHeights[0]!)}[v${encodeHeights[0]}]`);
+    } else {
+      chains.push(
+        `[0:v]split=${encodeHeights.length}${encodeHeights.map((h) => `[s${h}]`).join("")}`,
+      );
+      for (const h of encodeHeights) chains.push(`[s${h}]${scaleFilter(h)}[v${h}]`);
+    }
+    const args = ["-i", params.input, "-filter_complex", chains.join(";")];
+    for (const h of encodeHeights) {
+      args.push("-map", `[v${h}]`);
+      if (params.hasAudio) args.push("-map", "0:a:0");
+      args.push(
+        // vfr: see transcodeMp4 — never CFR-expand bogus 1000fps WebM rates.
+        "-fps_mode",
+        "vfr",
+        // Force a keyframe at every segment boundary so 4s VOD segments cut
+        // cleanly regardless of the source's GOP cadence.
+        "-force_key_frames",
+        "expr:gte(t,n_forced*4)",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "19",
+        "-pix_fmt",
+        "yuv420p",
+      );
+      if (params.hasAudio) args.push("-c:a", "aac", "-b:a", "128k");
+      args.push(...hlsMuxArgs(h));
+    }
+    await ffmpeg(args);
+  }
+
   const renditions: HlsRendition[] = [];
   for (const h of heights) {
-    const dims = fitDimensions(params.sourceWidth, params.sourceHeight, h);
-    const playlist = `${h}p.m3u8`;
-    const args = [
-      "-i",
-      params.input,
-      "-vf",
-      scaleFilter(h),
-      // vfr: see transcodeMp4 — never CFR-expand bogus 1000fps WebM rates.
-      "-fps_mode",
-      "vfr",
-      // Force a keyframe at every segment boundary so 4s VOD segments cut
-      // cleanly regardless of the source's GOP cadence.
-      "-force_key_frames",
-      "expr:gte(t,n_forced*4)",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-crf",
-      "23",
-      "-pix_fmt",
-      "yuv420p",
-    ];
-    if (params.hasAudio) {
-      args.push("-c:a", "aac", "-b:a", "128k");
-    } else {
-      args.push("-an");
-    }
-    args.push(
-      "-f",
-      "hls",
-      "-hls_time",
-      "4",
-      "-hls_playlist_type",
-      "vod",
-      "-hls_flags",
-      "independent_segments",
-      "-hls_segment_filename",
-      path.join(params.outDir, `${h}p_%04d.ts`),
-      path.join(params.outDir, playlist),
-    );
-    await ffmpeg(args);
+    const dims = copyHeights.includes(h)
+      ? { width: params.sourceWidth, height: params.sourceHeight }
+      : fitDimensions(params.sourceWidth, params.sourceHeight, h);
     renditions.push({
       height: dims.height,
       width: dims.width,
-      bandwidth: BANDWIDTH_BY_HEIGHT[h] ?? Math.round(h * 5000),
-      playlist,
+      bandwidth:
+        (await measuredBandwidth(params.outDir, h)) ??
+        BANDWIDTH_BY_HEIGHT[h] ??
+        Math.round(h * 5000),
+      playlist: `${h}p.m3u8`,
     });
   }
 
@@ -572,8 +661,10 @@ export async function cutKeepRanges(params: {
     "libx264",
     "-preset",
     "veryfast",
+    // CRF 18: the edit re-render becomes the new playback mezzanine that
+    // every future edit/ladder derives from — keep generation loss minimal.
     "-crf",
-    "23",
+    "18",
     "-pix_fmt",
     "yuv420p",
     "-movflags",

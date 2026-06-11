@@ -13,8 +13,10 @@ import {
   videoShares,
   watchLater,
   workspaces,
+  type Database,
 } from "@ryloom/db";
 
+import { normalizeKeepRanges } from "@/lib/edit-ranges";
 import { createPlaybackToken } from "@/lib/playback-token";
 import { BUCKETS, createSignedUrl, deletePrefix } from "@/lib/storage";
 import { wakeWorker } from "@/lib/wake-worker";
@@ -54,8 +56,15 @@ async function getOwnedVideo(
   return { video, membership };
 }
 
+/** The root db client or a transaction handle from `db.transaction`. */
+type DbConn = Database | Parameters<Parameters<Database["transaction"]>[0]>[0];
+
+/**
+ * Inserts a processing-jobs row. Callers must `wakeWorker()` after the write
+ * (or the enclosing transaction) commits.
+ */
 async function enqueueJob(
-  ctx: TRPCContext,
+  db: DbConn,
   job: {
     videoId: string;
     workspaceId: string;
@@ -64,14 +73,56 @@ async function enqueueJob(
     priority?: number;
   },
 ) {
-  await ctx.db.insert(processingJobs).values({
+  await db.insert(processingJobs).values({
     videoId: job.videoId,
     workspaceId: job.workspaceId,
     type: job.type,
     inputJson: job.input ?? {},
     priority: job.priority ?? 0,
   });
-  wakeWorker();
+}
+
+/** Job types that re-cut the playback timeline. Only one may be in flight per video. */
+const EDIT_JOB_TYPES = ["trim", "silence_removal", "filler_removal"] as const;
+/** Job types that rewrite the playback files — edits must wait for them too. */
+const PIPELINE_JOB_TYPES = ["transcode", "stitch"] as const;
+
+async function assertNoActiveEditJob(ctx: TRPCContext, videoId: string) {
+  const active = await ctx.db.query.processingJobs.findFirst({
+    where: and(
+      eq(processingJobs.videoId, videoId),
+      inArray(processingJobs.type, [...EDIT_JOB_TYPES, ...PIPELINE_JOB_TYPES]),
+      inArray(processingJobs.status, ["queued", "running"]),
+    ),
+  });
+  if (!active) return;
+  if ((PIPELINE_JOB_TYPES as readonly string[]).includes(active.type)) {
+    // Early-ready videos are watchable while the ingest transcode still
+    // renders the HLS ladder — an edit started now would race its tail.
+    throw new TRPCError({
+      code: "CONFLICT",
+      message: "The video is still finishing processing — try again shortly.",
+    });
+  }
+  throw new TRPCError({
+    code: "CONFLICT",
+    message: "An edit is already being applied — try again in a moment",
+  });
+}
+
+/**
+ * Auto-edits (silence/filler) replace pendingEditRanges wholesale, so a
+ * leftover trim — typically one whose background flatten failed terminally —
+ * must be retried (requestTrim) or reverted first, never silently clobbered.
+ */
+function assertNoPendingEditRanges(video: typeof videos.$inferSelect) {
+  if (video.pendingEditRanges && video.pendingEditRanges.length > 0) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message:
+        "A pending trim is still being applied or needs attention — retry or revert it first.",
+    });
+  }
 }
 
 /** Effective share settings: a share-link row overrides the video defaults. */
@@ -468,6 +519,7 @@ export const videoRouter = createTRPCRouter({
           chapters: video.chapters,
           cta: video.cta,
           shareToken: video.shareToken,
+          pendingEditRanges: video.pendingEditRanges,
         },
         playback: {
           mp4Url,
@@ -850,14 +902,49 @@ export const videoRouter = createTRPCRouter({
       if (video.status !== "ready") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Video must finish processing first" });
       }
-      await ctx.db.update(videos).set({ status: "processing" }).where(eq(videos.id, video.id));
-      await enqueueJob(ctx, {
-        videoId: video.id,
-        workspaceId: video.workspaceId,
-        type: "trim",
-        input: { keepRanges: input.keepRanges },
-        priority: membership.plan.priorityProcessing ? 10 : 0,
+      await assertNoActiveEditJob(ctx, video.id);
+
+      const keepRanges = normalizeKeepRanges(input.keepRanges, video.durationMs);
+      if (keepRanges.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "The trim would remove the entire video" });
+      }
+      // Keeping the whole timeline is a no-op — nothing to cut. It still
+      // clears any leftover pending trim (e.g. one whose flatten failed), so
+      // re-selecting the full timeline acts as an undo.
+      const first = keepRanges[0]!;
+      if (
+        keepRanges.length === 1 &&
+        first.startMs === 0 &&
+        video.durationMs !== null &&
+        first.endMs >= video.durationMs
+      ) {
+        if (video.pendingEditRanges && video.pendingEditRanges.length > 0) {
+          await ctx.db
+            .update(videos)
+            .set({ pendingEditRanges: null, updatedAt: new Date() })
+            .where(eq(videos.id, video.id));
+        }
+        return { ok: true };
+      }
+
+      // The trim is visible instantly: players apply pendingEditRanges
+      // client-side while the worker flattens in the background. Status stays
+      // 'ready' — viewers keep watching throughout. One transaction so the
+      // ranges can never be stranded without a job to flatten them.
+      await ctx.db.transaction(async (tx) => {
+        await tx
+          .update(videos)
+          .set({ pendingEditRanges: keepRanges, updatedAt: new Date() })
+          .where(eq(videos.id, video.id));
+        await enqueueJob(tx, {
+          videoId: video.id,
+          workspaceId: video.workspaceId,
+          type: "trim",
+          input: { keepRanges },
+          priority: membership.plan.priorityProcessing ? 10 : 0,
+        });
       });
+      wakeWorker();
       return { ok: true };
     }),
 
@@ -876,8 +963,11 @@ export const videoRouter = createTRPCRouter({
       if (video.status !== "ready") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Video must finish processing first" });
       }
-      await ctx.db.update(videos).set({ status: "processing" }).where(eq(videos.id, video.id));
-      await enqueueJob(ctx, {
+      await assertNoActiveEditJob(ctx, video.id);
+      assertNoPendingEditRanges(video);
+      // Status stays 'ready' — the worker sets pendingEditRanges once it has
+      // detected the silent ranges, then flattens in the background.
+      await enqueueJob(ctx.db, {
         videoId: video.id,
         workspaceId: video.workspaceId,
         type: "silence_removal",
@@ -888,6 +978,7 @@ export const videoRouter = createTRPCRouter({
         },
         priority: membership.plan.priorityProcessing ? 10 : 0,
       });
+      wakeWorker();
       return { ok: true };
     }),
 
@@ -897,13 +988,17 @@ export const videoRouter = createTRPCRouter({
     if (video.status !== "ready") {
       throw new TRPCError({ code: "BAD_REQUEST", message: "Video must finish processing first" });
     }
-    await ctx.db.update(videos).set({ status: "processing" }).where(eq(videos.id, video.id));
-    await enqueueJob(ctx, {
+    await assertNoActiveEditJob(ctx, video.id);
+    assertNoPendingEditRanges(video);
+    // Status stays 'ready' — the worker sets pendingEditRanges once it has
+    // detected the filler-word ranges, then flattens in the background.
+    await enqueueJob(ctx.db, {
       videoId: video.id,
       workspaceId: video.workspaceId,
       type: "filler_removal",
       priority: membership.plan.priorityProcessing ? 10 : 0,
     });
+    wakeWorker();
     return { ok: true };
   }),
 
@@ -936,13 +1031,14 @@ export const videoRouter = createTRPCRouter({
         })
         .returning();
       if (!created) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await enqueueJob(ctx, {
+      await enqueueJob(ctx.db, {
         videoId: created.id,
         workspaceId: input.workspaceId,
         type: "stitch",
         input: { sourceVideoIds: input.videoIds },
         priority: membership.plan.priorityProcessing ? 10 : 0,
       });
+      wakeWorker();
       return created;
     }),
 
@@ -955,13 +1051,21 @@ export const videoRouter = createTRPCRouter({
     if (!backup) {
       throw new TRPCError({ code: "BAD_REQUEST", message: "No original backup exists for this video" });
     }
-    await ctx.db.update(videos).set({ status: "processing" }).where(eq(videos.id, video.id));
-    await enqueueJob(ctx, {
-      videoId: video.id,
-      workspaceId: video.workspaceId,
-      type: "transcode",
-      input: { sourceBucket: backup.storageBucket, sourcePath: backup.storagePath, revert: true },
+    await assertNoActiveEditJob(ctx, video.id);
+    // One transaction so the video can never be left 'processing' with no job.
+    await ctx.db.transaction(async (tx) => {
+      await tx
+        .update(videos)
+        .set({ status: "processing", pendingEditRanges: null })
+        .where(eq(videos.id, video.id));
+      await enqueueJob(tx, {
+        videoId: video.id,
+        workspaceId: video.workspaceId,
+        type: "transcode",
+        input: { sourceBucket: backup.storageBucket, sourcePath: backup.storagePath, revert: true },
+      });
     });
+    wakeWorker();
     return { ok: true };
   }),
 
@@ -1007,7 +1111,28 @@ export const videoRouter = createTRPCRouter({
       orderBy: desc(processingJobs.createdAt),
       limit: 10,
     });
-    return { status: video.status, error: video.processingError, jobs };
+    // Most recent timeline-edit job. A 'failed' status is terminal: retries
+    // reset the row to 'queued', so 'failed' means all attempts exhausted.
+    const latestEditJob = await ctx.db.query.processingJobs.findFirst({
+      where: and(
+        eq(processingJobs.videoId, video.id),
+        inArray(processingJobs.type, [...EDIT_JOB_TYPES]),
+      ),
+      orderBy: desc(processingJobs.createdAt),
+    });
+    const editJob: "queued" | "running" | "failed" | null =
+      latestEditJob?.status === "queued" ||
+      latestEditJob?.status === "running" ||
+      latestEditJob?.status === "failed"
+        ? latestEditJob.status
+        : null;
+    return {
+      status: video.status,
+      error: video.processingError,
+      jobs,
+      pendingEditRanges: video.pendingEditRanges,
+      editJob,
+    };
   }),
 
   /** Empty trash: permanently delete videos soft-deleted more than 30 days ago. */

@@ -35,6 +35,11 @@ import type { inferRouterOutputs } from "@trpc/server";
 
 import type { AppRouter } from "@/server/api/root";
 import { api } from "@/trpc/react";
+import {
+  normalizeKeepRanges,
+  rawToVirtualMs,
+  virtualToRawMs,
+} from "@/lib/edit-ranges";
 import { useViewTracking } from "@/lib/use-view-tracking";
 import { formatCount, formatDuration, slugify } from "@/lib/utils";
 import {
@@ -214,12 +219,24 @@ export function WatchPageClient({
     }
   };
 
+  // Stored timestamps (transcript segments, comments) live on the raw
+  // timeline; while a pending edit is active the player speaks virtual ms
+  // (cuts removed), so convert at this boundary in both directions. New
+  // comment timestamps intentionally stay virtual — that IS the timeline
+  // once the edit flattens.
+  const pendingKeeps = video.pendingEditRanges?.length
+    ? normalizeKeepRanges(video.pendingEditRanges)
+    : [];
   const seekTo = (ms: number) => {
-    playerRef.current?.seekTo(ms);
+    playerRef.current?.seekTo(
+      pendingKeeps.length > 0 ? rawToVirtualMs(ms, pendingKeeps) : ms,
+    );
     playerRef.current?.play();
   };
   const getCurrentTimeMs = () =>
     playerRef.current?.getCurrentTimeMs() ?? currentTimeMs;
+  const rawPlayheadMs =
+    pendingKeeps.length > 0 ? virtualToRawMs(currentTimeMs, pendingKeeps) : currentTimeMs;
 
   const privacyMeta = PRIVACY_META[video.privacy] ?? {
     label: video.privacy,
@@ -468,6 +485,7 @@ export function WatchPageClient({
             chapters={video.chapters}
             durationMs={video.durationMs}
             cta={video.cta}
+            keepRanges={video.pendingEditRanges}
             onEvent={(type, playheadMs) => track(type, playheadMs)}
             onTimeUpdate={setCurrentTimeMs}
             className="shadow-sm"
@@ -516,7 +534,7 @@ export function WatchPageClient({
               <Card className="h-[30rem] gap-0 overflow-hidden p-0">
                 <TranscriptPanel
                   videoId={videoId}
-                  currentTimeMs={currentTimeMs}
+                  currentTimeMs={rawPlayheadMs}
                   seekTo={seekTo}
                   canEdit={data.canEdit}
                   videoTitle={video.title}

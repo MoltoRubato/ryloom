@@ -26,6 +26,8 @@ import { cleanupDir, createWorkDir, getVideoOrThrow, type VideoRow } from "./_sh
 
 const transcribeInput = z.object({
   autoAi: z.boolean().nullish(),
+  /** Times this job was re-enqueued because the playback file changed. */
+  requeues: z.number().int().nonnegative().nullish(),
 });
 
 const MAX_WHISPER_BYTES = 24 * 1024 * 1024;
@@ -559,8 +561,13 @@ export async function runTranscribeJob(job: ClaimedJob): Promise<Record<string, 
 
   const workDir = await createWorkDir(job.id);
   try {
+    // An edit can swap playbackUrl while we transcribe (minutes for long
+    // videos); the timings below are against THIS file, so re-check before
+    // writing and re-enqueue against the new file instead of landing a
+    // transcript on the old timeline.
+    const sourcePlaybackUrl = video.playbackUrl;
     const localVideo = path.join(workDir, "playback.mp4");
-    await downloadToFile(BUCKETS.processed, video.playbackUrl, localVideo);
+    await downloadToFile(BUCKETS.processed, sourcePlaybackUrl, localVideo);
 
     const info = await probe(localVideo);
     if (!info.hasAudio) {
@@ -576,6 +583,24 @@ export async function runTranscribeJob(job: ClaimedJob): Promise<Record<string, 
       provider === "openai"
         ? await transcribeWithWhisper(localVideo, workDir, durationSec)
         : await transcribeWithGemini(localVideo, workDir, durationSec);
+
+    const fresh = await db.query.videos.findFirst({
+      where: eq(videos.id, video.id),
+      columns: { playbackUrl: true },
+    });
+    if (fresh && fresh.playbackUrl !== sourcePlaybackUrl) {
+      const requeues = input.requeues ?? 0;
+      if (requeues < 2) {
+        await enqueueJob({
+          videoId: video.id,
+          workspaceId: video.workspaceId,
+          type: "transcribe",
+          inputJson: { autoAi, requeues: requeues + 1 },
+        });
+        return { stale: "playback changed during transcription — re-enqueued" };
+      }
+      return { stale: "playback changed during transcription — requeue budget exhausted" };
+    }
 
     return await finalizeTranscription({
       video,

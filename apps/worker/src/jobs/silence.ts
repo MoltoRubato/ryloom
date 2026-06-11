@@ -1,7 +1,11 @@
 import path from "node:path";
 
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 
+import { videos } from "@ryloom/db";
+
+import { db } from "../db";
 import { detectSilences, probe, type MsRange } from "../ffmpeg";
 import { type ClaimedJob } from "../queue";
 import { BUCKETS, downloadToFile } from "../storage";
@@ -11,7 +15,6 @@ import {
   getVideoOrThrow,
   invertToKeepRanges,
   reRenderWithKeepRanges,
-  restoreVideoReady,
 } from "./_shared";
 
 const silenceInput = z.object({
@@ -37,7 +40,8 @@ export async function runSilenceRemovalJob(
 
     const info = await probe(localInput);
     if (!info.hasAudio) {
-      await restoreVideoReady(video.id);
+      // No-op exits never touch status or pendingEditRanges — the video
+      // stayed 'ready' the whole time and no edit was ever pending.
       return { removedMs: 0, cuts: [], reason: "no_audio" };
     }
     const durationMs = info.durationMs || video.durationMs || 0;
@@ -60,21 +64,27 @@ export async function runSilenceRemovalJob(
       .filter((c) => c.endMs - c.startMs > 0);
 
     if (cuts.length === 0) {
-      await restoreVideoReady(video.id);
       return { removedMs: 0, cuts: [] };
     }
 
     const keepRanges = invertToKeepRanges(cuts, durationMs, MIN_KEEP_MS);
     if (keepRanges.length === 0) {
       // The whole video is silence — refuse rather than produce an empty file.
-      await restoreVideoReady(video.id);
       return { removedMs: 0, cuts: [], reason: "entire_video_silent" };
     }
     const keptMs = keepRanges.reduce((sum, r) => sum + (r.endMs - r.startMs), 0);
     if (keptMs >= durationMs) {
-      await restoreVideoReady(video.id);
       return { removedMs: 0, cuts: [] };
     }
+
+    // Persist the keep ranges FIRST: every player applies pendingEditRanges
+    // client-side, so the cuts are visible instantly while the flatten
+    // renders in the background. The swap inside reRenderWithKeepRanges
+    // clears them atomically with the playbackUrl change.
+    await db
+      .update(videos)
+      .set({ pendingEditRanges: keepRanges, updatedAt: new Date() })
+      .where(eq(videos.id, video.id));
 
     const result = await reRenderWithKeepRanges({
       job,

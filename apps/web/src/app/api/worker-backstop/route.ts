@@ -143,7 +143,7 @@ async function handle(req: Request): Promise<Response> {
   const rows = await db.execute(sql`
     SELECT 1 FROM processing_jobs
     WHERE (status = 'queued' AND scheduled_at <= now())
-       OR (status = 'running' AND locked_at < now() - interval '15 minutes')
+       OR (status = 'running' AND locked_at < now() - interval '5 minutes')
     LIMIT 1
   `);
   const hasWork = rows.length > 0 || finalized > 0;

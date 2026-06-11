@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,7 +27,14 @@ import {
 } from "lucide-react";
 import type HlsType from "hls.js";
 
-import type { VideoChapter, VideoCta } from "@ryloom/db";
+import type { EditRange, VideoChapter, VideoCta } from "@ryloom/db";
+import {
+  normalizeKeepRanges,
+  rawToVirtualMs,
+  snapToKeepMs,
+  virtualDurationMs,
+  virtualToRawMs,
+} from "@/lib/edit-ranges";
 import { cn, formatDuration } from "@/lib/utils";
 
 export type PlayerEventType =
@@ -56,6 +64,13 @@ export type VideoPlayerProps = {
   watermarkEmail?: string | null;
   cta?: VideoCta | null;
   brandColor?: string | null;
+  /**
+   * Pending (non-destructive) edit: KEEP ranges in ms on the raw playback
+   * file's timeline. When set, the player presents the virtual timeline —
+   * cut sections are skipped during playback and hidden from the seek bar
+   * and duration — until the worker swaps in the flattened file.
+   */
+  keepRanges?: EditRange[] | null;
   onEvent?: (type: PlayerEventType, playheadMs: number) => void;
   /** Fired on every native timeupdate (~4Hz) with the playhead in ms. */
   onTimeUpdate?: (playheadMs: number) => void;
@@ -87,6 +102,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       watermarkEmail,
       cta,
       brandColor,
+      keepRanges,
       onEvent,
       onTimeUpdate,
       autoPlay,
@@ -109,6 +125,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       onTimeUpdateRef.current = onTimeUpdate;
     }, [onEvent, onTimeUpdate]);
 
+    // Pending-edit virtual timeline. Empty array = no pending edit; the
+    // player then behaves exactly as before (raw timeline).
+    const keeps = useMemo(
+      () =>
+        keepRanges && keepRanges.length > 0 ? normalizeKeepRanges(keepRanges) : [],
+      [keepRanges],
+    );
+    const keepsRef = useRef(keeps);
+    const virtualEndedRef = useRef(false);
+    // Programmatic currentTime assignments (cut-skips, snaps, replay rewinds)
+    // fire a native `seeked`; this flags the next one so it isn't reported
+    // as a viewer-initiated seek.
+    const suppressNextSeekRef = useRef(false);
+    useEffect(() => {
+      keepsRef.current = keeps;
+      if (keeps.length === 0) virtualEndedRef.current = false;
+    }, [keeps]);
+
     const [playing, setPlaying] = useState(false);
     const [started, setStarted] = useState(false);
     const [ended, setEnded] = useState(false);
@@ -128,9 +162,27 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const [pipSupported, setPipSupported] = useState(false);
     const [watermarkIdx, setWatermarkIdx] = useState(0);
 
-    const totalMs = mediaDurationMs > 0 ? mediaDurationMs : (durationMs ?? 0);
+    const rawTotalMs = mediaDurationMs > 0 ? mediaDurationMs : (durationMs ?? 0);
+    const totalMs = keeps.length > 0 ? virtualDurationMs(keeps) : rawTotalMs;
 
-    // ----- Source attachment (HLS / native HLS / MP4) -----------------------
+    // Chapters and the CTA are authored in raw-timeline ms; while a pending
+    // edit is active, remap them onto the virtual timeline so menu seeks,
+    // tick marks, and reveal times line up with what the viewer sees.
+    const displayChapters = useMemo(() => {
+      if (!chapters || chapters.length === 0 || keeps.length === 0) return chapters;
+      const virtualTotal = virtualDurationMs(keeps);
+      return chapters
+        .map((c) => ({ ...c, startMs: rawToVirtualMs(c.startMs, keeps) }))
+        .filter((c) => c.startMs < virtualTotal);
+    }, [chapters, keeps]);
+    const displayCta = useMemo(() => {
+      if (!cta || keeps.length === 0) return cta;
+      return cta.showAtMs !== null && cta.showAtMs !== undefined
+        ? { ...cta, showAtMs: rawToVirtualMs(cta.showAtMs, keeps) }
+        : cta;
+    }, [cta, keeps]);
+
+    // ----- Source attachment (MP4 / HLS / native HLS) -----------------------
 
     useEffect(() => {
       const video = videoRef.current;
@@ -138,34 +190,48 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       let hls: HlsType | null = null;
       let cancelled = false;
 
-      const canPlayNativeHls =
-        video.canPlayType("application/vnd.apple.mpegurl") !== "";
-
-      if (hlsUrl && canPlayNativeHls) {
-        video.src = hlsUrl;
-      } else if (hlsUrl) {
+      // The progressive MP4 is the cleanest encode we produce (a single
+      // x264 generation); the HLS renditions are re-encodes of it. Prefer
+      // the MP4 so viewers see download-grade quality, and keep HLS as the
+      // fallback when the MP4 is missing or fails to load.
+      const attachHls = () => {
+        if (!hlsUrl) return;
+        const canPlayNativeHls =
+          video.canPlayType("application/vnd.apple.mpegurl") !== "";
+        if (canPlayNativeHls) {
+          video.src = hlsUrl;
+          return;
+        }
         void import("hls.js").then(({ default: Hls }) => {
-          if (cancelled) return;
-          if (Hls.isSupported()) {
-            hls = new Hls({ maxBufferLength: 30, capLevelToPlayerSize: true });
-            hls.loadSource(hlsUrl);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.ERROR, (_event, data) => {
-              if (!data.fatal) return;
-              hls?.destroy();
-              hls = null;
-              if (mp4Url) video.src = mp4Url;
-            });
-          } else if (mp4Url) {
-            video.src = mp4Url;
-          }
+          if (cancelled || !Hls.isSupported()) return;
+          hls = new Hls({
+            maxBufferLength: 30,
+            // Default ~500kbps estimate starts every video at the 360p rung;
+            // screen recordings are low-bitrate, so start optimistic and let
+            // measured throughput correct downward.
+            abrEwmaDefaultEstimate: 6_000_000,
+          });
+          hls.loadSource(hlsUrl);
+          hls.attachMedia(video);
         });
-      } else if (mp4Url) {
+      };
+
+      const onSourceError = () => {
+        if (video.src && mp4Url && video.src.includes(mp4Url) && hlsUrl) {
+          attachHls();
+        }
+      };
+
+      if (mp4Url) {
         video.src = mp4Url;
+        video.addEventListener("error", onSourceError);
+      } else {
+        attachHls();
       }
 
       return () => {
         cancelled = true;
+        video.removeEventListener("error", onSourceError);
         hls?.destroy();
       };
     }, [hlsUrl, mp4Url]);
@@ -176,10 +242,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       const video = videoRef.current;
       if (!video) return;
 
+      // Events and displayed positions report virtual ms while a pending
+      // edit is active, raw ms otherwise.
+      const toDisplayMs = (rawMs: number) => {
+        const k = keepsRef.current;
+        return k.length > 0 ? rawToVirtualMs(rawMs, k) : rawMs;
+      };
       const emit = (type: PlayerEventType) =>
-        onEventRef.current?.(type, Math.round(video.currentTime * 1000));
+        onEventRef.current?.(type, Math.round(toDisplayMs(video.currentTime * 1000)));
+
+      // Move the playhead out of a cut section (to the next kept one) so no
+      // trimmed-off frames render.
+      const snapIntoKeeps = () => {
+        const k = keepsRef.current;
+        if (k.length === 0) return;
+        const rawMs = video.currentTime * 1000;
+        const snapped = snapToKeepMs(rawMs, k);
+        if (snapped !== null && snapped > rawMs + 10) {
+          suppressNextSeekRef.current = true;
+          video.currentTime = snapped / 1000;
+        }
+      };
 
       const onPlay = () => {
+        virtualEndedRef.current = false;
+        // Covers autoplay and imperative play(): snap before a trimmed-off
+        // intro gets a chance to render.
+        snapIntoKeeps();
         setPlaying(true);
         setEnded(false);
         setStarted(true);
@@ -187,14 +276,45 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       };
       const onPause = () => {
         setPlaying(false);
-        if (!video.ended) emit("pause");
+        if (!video.ended && !virtualEndedRef.current) emit("pause");
       };
       const onTime = () => {
-        const ms = video.currentTime * 1000;
+        const rawMs = video.currentTime * 1000;
+        const k = keepsRef.current;
+        let ms = rawMs;
+        let pct =
+          isFinite(video.duration) && video.duration > 0
+            ? video.currentTime / video.duration
+            : null;
+        if (k.length > 0) {
+          const virtualTotal = virtualDurationMs(k);
+          const snapped = snapToKeepMs(rawMs, k);
+          if (snapped === null) {
+            // Past the last keep range: this is the virtual end of the video.
+            if (!virtualEndedRef.current) {
+              virtualEndedRef.current = true;
+              video.pause();
+              setPlaying(false);
+              setEnded(true);
+              emit("complete");
+            }
+            setCurrentMs(virtualTotal);
+            onTimeUpdateRef.current?.(virtualTotal);
+            return;
+          }
+          virtualEndedRef.current = false;
+          if (snapped > rawMs + 10) {
+            // Inside a cut section — jump over it to the next kept one.
+            suppressNextSeekRef.current = true;
+            video.currentTime = snapped / 1000;
+            return;
+          }
+          ms = rawToVirtualMs(rawMs, k);
+          pct = virtualTotal > 0 ? ms / virtualTotal : null;
+        }
         setCurrentMs(ms);
         onTimeUpdateRef.current?.(ms);
-        if (isFinite(video.duration) && video.duration > 0) {
-          const pct = video.currentTime / video.duration;
+        if (pct !== null) {
           const fired = progressFiredRef.current;
           if (pct >= 0.25 && !fired.p25) {
             fired.p25 = true;
@@ -210,10 +330,21 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           }
         }
       };
-      const onSeeked = () => emit("seek");
+      const onSeeked = () => {
+        if (suppressNextSeekRef.current) {
+          suppressNextSeekRef.current = false;
+          return;
+        }
+        emit("seek");
+      };
       const onEnded = () => {
         setPlaying(false);
         setEnded(true);
+        // When the last keep range runs to the raw end of the file, both the
+        // virtual-end branch in onTime and this handler fire — keep the
+        // `complete` emits mutually exclusive (in either order).
+        if (virtualEndedRef.current) return;
+        virtualEndedRef.current = true;
         emit("complete");
       };
       const onMeta = () => {
@@ -221,14 +352,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           setMediaDurationMs(video.duration * 1000);
         }
       };
+      const onLoadedMeta = () => {
+        onMeta();
+        // The poster / first decoded frame should come from the first keep
+        // range, not a trimmed-off intro.
+        snapIntoKeeps();
+      };
       const onProgress = () => {
         if (!isFinite(video.duration) || video.duration <= 0) return;
+        const k = keepsRef.current;
+        const totalVirtualMs =
+          k.length > 0 ? virtualDurationMs(k) : video.duration * 1000;
+        if (totalVirtualMs <= 0) {
+          setBuffered([]);
+          return;
+        }
         const ranges: BufferedRange[] = [];
         for (let i = 0; i < video.buffered.length; i++) {
-          ranges.push({
-            start: video.buffered.start(i) / video.duration,
-            end: video.buffered.end(i) / video.duration,
-          });
+          const startMs = video.buffered.start(i) * 1000;
+          const endMs = video.buffered.end(i) * 1000;
+          ranges.push(
+            k.length > 0
+              ? {
+                  start: rawToVirtualMs(startMs, k) / totalVirtualMs,
+                  end: rawToVirtualMs(endMs, k) / totalVirtualMs,
+                }
+              : { start: startMs / totalVirtualMs, end: endMs / totalVirtualMs },
+          );
         }
         setBuffered(ranges);
       };
@@ -246,7 +396,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       video.addEventListener("timeupdate", onTime);
       video.addEventListener("seeked", onSeeked);
       video.addEventListener("ended", onEnded);
-      video.addEventListener("loadedmetadata", onMeta);
+      video.addEventListener("loadedmetadata", onLoadedMeta);
       video.addEventListener("durationchange", onMeta);
       video.addEventListener("progress", onProgress);
       video.addEventListener("volumechange", onVolumeChange);
@@ -260,7 +410,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         video.removeEventListener("timeupdate", onTime);
         video.removeEventListener("seeked", onSeeked);
         video.removeEventListener("ended", onEnded);
-        video.removeEventListener("loadedmetadata", onMeta);
+        video.removeEventListener("loadedmetadata", onLoadedMeta);
         video.removeEventListener("durationchange", onMeta);
         video.removeEventListener("progress", onProgress);
         video.removeEventListener("volumechange", onVolumeChange);
@@ -330,15 +480,28 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const togglePlay = useCallback(() => {
       const v = videoRef.current;
       if (!v) return;
-      if (v.paused || v.ended) void v.play();
-      else v.pause();
+      if (v.paused || v.ended) {
+        const k = keepsRef.current;
+        if (k.length > 0 && snapToKeepMs(v.currentTime * 1000, k) === null) {
+          // Replay after the virtual end: rewind to the first kept section.
+          v.currentTime = (k[0]?.startMs ?? 0) / 1000;
+        }
+        void v.play();
+      } else {
+        v.pause();
+      }
     }, []);
 
+    /** Seeks to a position given in *virtual* ms when a pending edit is
+     * active, raw ms otherwise. */
     const seekToMs = useCallback((ms: number) => {
       const v = videoRef.current;
       if (!v) return;
+      const k = keepsRef.current;
+      const rawMs = k.length > 0 ? virtualToRawMs(Math.max(0, ms), k) : ms;
+      virtualEndedRef.current = false;
       const durS = isFinite(v.duration) && v.duration > 0 ? v.duration : null;
-      const targetS = Math.max(0, ms / 1000);
+      const targetS = Math.max(0, rawMs / 1000);
       v.currentTime = durS !== null ? Math.min(targetS, Math.max(0, durS - 0.05)) : targetS;
     }, []);
 
@@ -382,7 +545,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       ref,
       () => ({
         seekTo: (ms: number) => seekToMs(ms),
-        getCurrentTimeMs: () => (videoRef.current?.currentTime ?? 0) * 1000,
+        getCurrentTimeMs: () => {
+          const rawMs = (videoRef.current?.currentTime ?? 0) * 1000;
+          const k = keepsRef.current;
+          return k.length > 0 ? rawToVirtualMs(rawMs, k) : rawMs;
+        },
         play: () => void videoRef.current?.play(),
         pause: () => videoRef.current?.pause(),
       }),
@@ -404,6 +571,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (target?.closest("input, textarea, select, [contenteditable='true']")) {
           return;
         }
+        // Relative seeks operate on the virtual timeline while a pending
+        // edit is active (seekToMs converts back to raw).
+        const curMs = () => {
+          const k = keepsRef.current;
+          const rawMs = v.currentTime * 1000;
+          return k.length > 0 ? rawToVirtualMs(rawMs, k) : rawMs;
+        };
         let handled = true;
         switch (e.key) {
           case " ":
@@ -413,17 +587,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             break;
           case "j":
           case "J":
-            seekToMs(v.currentTime * 1000 - 10_000);
+            seekToMs(curMs() - 10_000);
             break;
           case "l":
           case "L":
-            seekToMs(v.currentTime * 1000 + 10_000);
+            seekToMs(curMs() + 10_000);
             break;
           case "ArrowLeft":
-            seekToMs(v.currentTime * 1000 - 5_000);
+            seekToMs(curMs() - 5_000);
             break;
           case "ArrowRight":
-            seekToMs(v.currentTime * 1000 + 5_000);
+            seekToMs(curMs() + 5_000);
             break;
           case "ArrowUp":
             setVolumeClamped(v.volume + 0.1);
@@ -445,7 +619,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             break;
           default:
             if (/^[0-9]$/.test(e.key)) {
-              if (isFinite(v.duration) && v.duration > 0) {
+              const k = keepsRef.current;
+              if (k.length > 0) {
+                seekToMs((Number(e.key) / 10) * virtualDurationMs(k));
+              } else if (isFinite(v.duration) && v.duration > 0) {
                 v.currentTime = (Number(e.key) / 10) * v.duration;
               }
             } else {
@@ -487,7 +664,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const commitSeekFraction = useCallback(
       (fraction: number) => {
         const v = videoRef.current;
-        if (v && isFinite(v.duration) && v.duration > 0) {
+        const k = keepsRef.current;
+        if (k.length > 0) {
+          // The seek bar fraction is over the virtual timeline.
+          seekToMs(fraction * virtualDurationMs(k));
+        } else if (v && isFinite(v.duration) && v.duration > 0) {
           v.currentTime = fraction * v.duration;
         } else if (totalMs > 0) {
           seekToMs(fraction * totalMs);

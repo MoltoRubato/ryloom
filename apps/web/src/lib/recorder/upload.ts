@@ -30,7 +30,7 @@ export type UploadHandle = {
   abort: () => Promise<void>;
 };
 
-const PART_CONCURRENCY = 3;
+const PART_CONCURRENCY = 6;
 const RETRY_DELAYS_MS = [1000, 3000, 5000, 10000];
 
 type UploadSignal = {

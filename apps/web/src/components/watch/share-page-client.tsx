@@ -21,6 +21,11 @@ import type { inferRouterOutputs } from "@trpc/server";
 
 import type { AppRouter } from "@/server/api/root";
 import { api } from "@/trpc/react";
+import {
+  normalizeKeepRanges,
+  rawToVirtualMs,
+  virtualToRawMs,
+} from "@/lib/edit-ranges";
 import { createClient } from "@/lib/supabase/client";
 import { useViewTracking } from "@/lib/use-view-tracking";
 import { cn, formatCount, getInitials } from "@/lib/utils";
@@ -295,12 +300,24 @@ function ShareWatchView({
   const showComments = data.permissions.canComment;
   const showSidebar = showComments || transcriptAvailable;
 
+  // Stored timestamps (transcript segments, comments) live on the raw
+  // timeline; while a pending edit is active the player speaks virtual ms
+  // (cuts removed), so convert at this boundary in both directions. New
+  // comment timestamps intentionally stay virtual — that IS the timeline
+  // once the edit flattens.
+  const pendingKeeps = data.video.pendingEditRanges?.length
+    ? normalizeKeepRanges(data.video.pendingEditRanges)
+    : [];
   const seekTo = (ms: number) => {
-    playerRef.current?.seekTo(ms);
+    playerRef.current?.seekTo(
+      pendingKeeps.length > 0 ? rawToVirtualMs(ms, pendingKeeps) : ms,
+    );
     playerRef.current?.play();
   };
   const getCurrentTimeMs = () =>
     playerRef.current?.getCurrentTimeMs() ?? currentTimeMs;
+  const rawPlayheadMs =
+    pendingKeeps.length > 0 ? virtualToRawMs(currentTimeMs, pendingKeeps) : currentTimeMs;
 
   const copyLink = () => {
     void navigator.clipboard.writeText(window.location.href).then(() => {
@@ -404,6 +421,7 @@ function ShareWatchView({
               watermarkEmail={data.watermarkEmail}
               cta={data.video.cta}
               brandColor={data.workspace?.brandColor}
+              keepRanges={data.video.pendingEditRanges}
               onEvent={(type, playheadMs) => track(type, playheadMs)}
               onTimeUpdate={setCurrentTimeMs}
               className="shadow-sm"
@@ -502,7 +520,7 @@ function ShareWatchView({
                       <TranscriptPanel
                         videoId={data.video.id}
                         shareToken={token}
-                        currentTimeMs={currentTimeMs}
+                        currentTimeMs={rawPlayheadMs}
                         seekTo={seekTo}
                       />
                     </TabsContent>

@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { createClient } from "@supabase/supabase-js";
 
 import { env } from "./env";
-import { r2DownloadToFile, r2UploadFile } from "./r2";
+import { r2DeleteObject, r2DeletePrefix, r2DownloadToFile, r2UploadFile } from "./r2";
 
 /** Bucket names — must stay in sync with apps/web/src/lib/storage.ts */
 export const BUCKETS = {
@@ -31,10 +31,14 @@ export const storagePaths = {
     `workspaces/${workspaceId}/videos/${videoId}/processed/${label}.mp4`,
   processedBackup: (workspaceId: string, videoId: string, millis: number) =>
     `workspaces/${workspaceId}/videos/${videoId}/processed/backup-${millis}.mp4`,
-  hlsDir: (workspaceId: string, videoId: string) =>
-    `workspaces/${workspaceId}/videos/${videoId}/processed/hls`,
-  hlsMaster: (workspaceId: string, videoId: string) =>
-    `workspaces/${workspaceId}/videos/${videoId}/processed/hls/master.m3u8`,
+  // Ladders are written to a versioned prefix (hls-<version>) so a rebuild
+  // never overwrites segments an in-flight viewer is still streaming; the
+  // /api/hls proxy derives the prefix from videos.hlsUrl. The unversioned
+  // form remains for ladders created before versioning shipped.
+  hlsDir: (workspaceId: string, videoId: string, version?: string) =>
+    `workspaces/${workspaceId}/videos/${videoId}/processed/${version ? `hls-${version}` : "hls"}`,
+  hlsMaster: (workspaceId: string, videoId: string, version?: string) =>
+    `workspaces/${workspaceId}/videos/${videoId}/processed/${version ? `hls-${version}` : "hls"}/master.m3u8`,
   thumbnail: (workspaceId: string, videoId: string, name = "default.jpg") =>
     `workspaces/${workspaceId}/videos/${videoId}/thumbs/${name}`,
   captions: (workspaceId: string, videoId: string, lang = "en", fmt = "vtt") =>
@@ -93,6 +97,26 @@ export async function uploadFile(
   }
 }
 
+/** Deletes a single storage object (e.g. a pruned playback backup). */
+export async function deleteFile(bucket: string, storagePath: string): Promise<void> {
+  if (R2_BUCKETS.has(bucket)) {
+    await r2DeleteObject(storagePath);
+    return;
+  }
+  const { error } = await supabase.storage.from(bucket).remove([storagePath]);
+  if (error) {
+    throw new Error(`Storage delete failed (${bucket}/${storagePath}): ${error.message}`);
+  }
+}
+
+/** Deletes every object under a prefix (e.g. a superseded HLS ladder). */
+export async function deletePrefix(bucket: string, storagePrefix: string): Promise<void> {
+  if (!R2_BUCKETS.has(bucket)) {
+    throw new Error(`deletePrefix is only implemented for R2 buckets (got ${bucket})`);
+  }
+  await r2DeletePrefix(storagePrefix);
+}
+
 const EXT_CONTENT_TYPES: Record<string, string> = {
   ".m3u8": "application/vnd.apple.mpegurl",
   ".ts": "video/mp2t",
@@ -111,28 +135,48 @@ export function contentTypeFor(file: string): string {
   return EXT_CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
 }
 
+const UPLOAD_DIR_CONCURRENCY = 8;
+
 /**
- * Recursively uploads a local directory to a storage prefix.
- * Used for the HLS ladder (master.m3u8 + rendition playlists + segments).
+ * Recursively uploads a local directory to a storage prefix with a pool of
+ * 8 concurrent PUTs — an HLS ladder is hundreds of small segments, and
+ * serial uploads dominate wall time.
  */
 export async function uploadDir(
   bucket: string,
   storagePrefix: string,
   localDir: string,
 ): Promise<number> {
-  const entries = await fs.readdir(localDir, { withFileTypes: true });
-  let uploaded = 0;
-  for (const entry of entries) {
-    const localPath = path.join(localDir, entry.name);
-    const remotePath = `${storagePrefix}/${entry.name}`;
-    if (entry.isDirectory()) {
-      uploaded += await uploadDir(bucket, remotePath, localPath);
-    } else if (entry.isFile()) {
-      await uploadFile(bucket, remotePath, localPath, contentTypeFor(entry.name), true);
-      uploaded += 1;
+  const files: { localPath: string; remotePath: string }[] = [];
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const localPath = path.join(dir, entry.name);
+      const remotePath = `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        await walk(localPath, remotePath);
+      } else if (entry.isFile()) {
+        files.push({ localPath, remotePath });
+      }
     }
-  }
-  return uploaded;
+  };
+  await walk(localDir, storagePrefix);
+
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_DIR_CONCURRENCY, files.length) }, async () => {
+      while (next < files.length) {
+        const file = files[next++]!;
+        await uploadFile(
+          bucket,
+          file.remotePath,
+          file.localPath,
+          contentTypeFor(file.localPath),
+          true,
+        );
+      }
+    }),
+  );
+  return files.length;
 }
 
 /** Full public URL for objects in public buckets (thumbnails, captions). */

@@ -183,6 +183,14 @@ function errorMessage(err, fallback) {
   return err.message || fallback;
 }
 
+/** File extension for a recorder mimeType (may carry ;codecs=… params). */
+function extensionForMime(mimeType) {
+  const base = String(mimeType || "").split(";")[0].trim().toLowerCase();
+  if (base === "video/mp4") return "mp4";
+  if (base === "video/x-matroska") return "mkv";
+  return "webm";
+}
+
 // ---------------------------------------------------------------------------
 // Config + Supabase bootstrap
 // ---------------------------------------------------------------------------
@@ -792,6 +800,10 @@ async function beginCapture() {
   try {
     await state.recorder.start({
       sourceId: state.source.id,
+      // Physical pixel size for screens (from get-sources) — lets the
+      // recorder pin capture at native resolution instead of Chromium's
+      // 2880x1800 downscale.
+      captureSize: state.source.captureSize || null,
       micEnabled: Boolean(state.prefs.micOn),
       micDeviceId: state.prefs.micDeviceId || $("mic-select").value || null,
       effects: {
@@ -1188,9 +1200,12 @@ function saveLocalCopy() {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+  const ext = extensionForMime(
+    state.blob.type || (state.active && state.active.mimeType),
+  );
   const a = document.createElement("a");
   a.href = URL.createObjectURL(state.blob);
-  a.download = `ryloom-recording-${stamp}.webm`;
+  a.download = `ryloom-recording-${stamp}.${ext}`;
   document.body.appendChild(a);
   a.click();
   a.remove();

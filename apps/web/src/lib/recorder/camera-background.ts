@@ -18,8 +18,8 @@
 import { BACKGROUND_PAINTERS, type CameraBackgroundId } from "./effects";
 
 const OUTPUT_FPS = 30;
-/** Re-draw watchdog cadence — keeps frames flowing when rAF throttles. */
-const HIDDEN_TICK_MS = 66;
+/** Dedicated-worker tick cadence — keeps frames flowing when rAF halts. */
+const WORKER_TICK_MS = 33;
 const WASM_BASE_PATH = "/mediapipe/wasm";
 const MODEL_PATH = "/models/selfie_segmenter.tflite";
 
@@ -63,7 +63,9 @@ export class CameraBackgroundProcessor {
   private lastVideoTime = -1;
 
   private rafId: number | null = null;
-  private tickTimer: number | null = null;
+  /** Inline-blob worker that clocks draws while the tab is hidden. */
+  private tickWorker: Worker | null = null;
+  private tickWorkerUrl: string | null = null;
   private lastDrawAt = 0;
   private destroyed = false;
 
@@ -95,6 +97,7 @@ export class CameraBackgroundProcessor {
     this.personCanvas.width = width;
     this.personCanvas.height = height;
     this.personCtx = this.personCanvas.getContext("2d") as CanvasRenderingContext2D;
+    this.applyCtxQuality();
 
     this.maskCanvas = document.createElement("canvas");
     this.maskCanvas.width = 256;
@@ -106,16 +109,25 @@ export class CameraBackgroundProcessor {
     this.outputStream = this.canvas.captureStream(OUTPUT_FPS);
 
     const loop = () => {
-      this.drawFrame();
+      // captureStream(30) can't consume 120Hz repaints — hold rAF to ~30fps.
+      if (performance.now() - this.lastDrawAt >= 31) this.drawFrame();
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);
-    // rAF throttles (or halts) in hidden tabs — exactly where a recorder
-    // lives while the presenter works elsewhere. The timer keeps frames
-    // flowing whenever rAF goes quiet.
-    this.tickTimer = window.setInterval(() => {
-      if (performance.now() - this.lastDrawAt > 80) this.drawFrame();
-    }, HIDDEN_TICK_MS);
+    // rAF halts in hidden tabs and Chromium aligns page timers to >=1s —
+    // exactly where a recorder lives while the presenter works elsewhere.
+    // Dedicated-worker timers are never throttled, so a tiny inline worker
+    // clocks frames at ~30fps; rAF stays the primary clock when the tab is
+    // visible (the 25ms guard prevents double-draws).
+    this.tickWorkerUrl = URL.createObjectURL(
+      new Blob([`setInterval(() => postMessage(0), ${WORKER_TICK_MS});`], {
+        type: "text/javascript",
+      }),
+    );
+    this.tickWorker = new Worker(this.tickWorkerUrl);
+    this.tickWorker.onmessage = () => {
+      if (performance.now() - this.lastDrawAt > 25) this.drawFrame();
+    };
 
     if (background !== "none") this.ensureSegmenter();
   }
@@ -134,8 +146,10 @@ export class CameraBackgroundProcessor {
     this.destroyed = true;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     this.rafId = null;
-    if (this.tickTimer !== null) window.clearInterval(this.tickTimer);
-    this.tickTimer = null;
+    if (this.tickWorker) this.tickWorker.terminate();
+    this.tickWorker = null;
+    if (this.tickWorkerUrl) URL.revokeObjectURL(this.tickWorkerUrl);
+    this.tickWorkerUrl = null;
     this.outputStream.getTracks().forEach((track) => track.stop());
     this.video.srcObject = null;
     this.segmenter?.close();
@@ -179,6 +193,14 @@ export class CameraBackgroundProcessor {
     })();
   }
 
+  /** Resizing a canvas resets its 2D context state — reapply smoothing. */
+  private applyCtxQuality(): void {
+    this.ctx.imageSmoothingEnabled = true;
+    this.ctx.imageSmoothingQuality = "high";
+    this.personCtx.imageSmoothingEnabled = true;
+    this.personCtx.imageSmoothingQuality = "high";
+  }
+
   private drawFrame(): void {
     if (this.destroyed) return;
     this.lastDrawAt = performance.now();
@@ -191,6 +213,7 @@ export class CameraBackgroundProcessor {
       this.canvas.height = video.videoHeight;
       this.personCanvas.width = video.videoWidth;
       this.personCanvas.height = video.videoHeight;
+      this.applyCtxQuality();
     }
     const w = this.canvas.width;
     const h = this.canvas.height;

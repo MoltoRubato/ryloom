@@ -388,6 +388,8 @@ export type VideoCta = {
   color?: string;
   showAtMs?: number | null;
 };
+/** A kept (visible) span of the current playback file's timeline, in ms. */
+export type EditRange = { startMs: number; endMs: number };
 
 export const videos = pgTable(
   "videos",
@@ -436,6 +438,11 @@ export const videos = pgTable(
     domainRestriction: text("domain_restriction").array(),
     cta: jsonb("cta").$type<VideoCta | null>(),
     chapters: jsonb("chapters").$type<VideoChapter[] | null>(),
+    // Pending non-destructive edit: KEEP ranges on the current playback
+    // timeline. Players apply these client-side the moment an edit is
+    // requested; the worker's background re-render swaps playbackUrl and
+    // clears this. Null = no edit in flight.
+    pendingEditRanges: jsonb("pending_edit_ranges").$type<EditRange[] | null>(),
     tags: text("tags").array(),
     viewCount: integer("view_count").notNull().default(0),
     uniqueViewerCount: integer("unique_viewer_count").notNull().default(0),

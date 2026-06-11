@@ -5,7 +5,8 @@
  * (chromeMediaSource constraints), optionally mixes the microphone through an
  * AudioContext into a MediaStreamAudioDestinationNode (ready for future
  * multi-source audio), and feeds the combined stream into a MediaRecorder
- * producing WebM (VP9+Opus, VP8 fallback) with 1s timeslices kept in memory.
+ * (hardware H.264 MP4 preferred, WebM VP9/VP8 fallback) with 1s timeslices
+ * kept in memory.
  *
  * Effects: when a background is selected, the screen capture is composited
  * live onto a canvas — wallpaper behind, content inset with padding, rounded
@@ -18,15 +19,19 @@
  */
 "use strict";
 
+// H.264 first — it's hardware-encoded, while VP9/VP8 (libvpx) are software
+// and silently drop frames at high resolutions.
 const MIME_CANDIDATES = [
+  "video/mp4;codecs=avc1.640033,mp4a.40.2",
+  "video/webm;codecs=h264,opus",
   "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp8,opus",
   "video/webm",
 ];
 
 /** Composite output is capped so encoding stays realtime on laptops. */
-const MAX_COMPOSITE_WIDTH = 1920;
-const MAX_COMPOSITE_HEIGHT = 1200;
+const MAX_COMPOSITE_WIDTH = 2560;
+const MAX_COMPOSITE_HEIGHT = 1600;
 const COMPOSITE_FPS = 30;
 
 /** Padding presets (Effects → Canvas) as a fraction of the short edge. */
@@ -144,6 +149,10 @@ class Recorder {
     this.compositeCanvas = null;
     this.compositeTimer = null;
     this.compositeDims = null;
+    this.compositeFrameHandle = null;
+    this.compositeSuspended = false;
+    this._compositeDrawNow = null;
+    this._compositeSchedule = null;
   }
 
   static pickMimeType() {
@@ -160,6 +169,7 @@ class Recorder {
 
   /**
    * @param {{ sourceId: string, micEnabled: boolean, micDeviceId?: string|null,
+   *           captureSize?: { width: number, height: number }|null,
    *           effects?: { background?: string, padding?: string, corners?: string },
    *           onScreenEnded?: () => void, onError?: (err: Error) => void }} opts
    */
@@ -170,16 +180,29 @@ class Recorder {
     this.onScreenEnded = opts.onScreenEnded || null;
     this.onError = opts.onError || null;
 
-    // 1. Screen / window capture via the Electron desktop source id.
+    // 1. Screen / window capture via the Electron desktop source id. Without
+    // explicit size constraints Chromium caps desktop capture at 2880x1800
+    // and downscales Retina/4K/5K displays (blurry, non-integer scaling), so
+    // screens pin the display's physical pixel size (from get-sources) and
+    // windows (size unknown up-front) just lift the cap.
+    const mandatory = {
+      chromeMediaSource: "desktop",
+      chromeMediaSourceId: opts.sourceId,
+      maxFrameRate: 30,
+    };
+    const captureSize = opts.captureSize;
+    if (captureSize && captureSize.width > 0 && captureSize.height > 0) {
+      mandatory.minWidth = captureSize.width;
+      mandatory.maxWidth = captureSize.width;
+      mandatory.minHeight = captureSize.height;
+      mandatory.maxHeight = captureSize.height;
+    } else {
+      mandatory.maxWidth = 4096;
+      mandatory.maxHeight = 4096;
+    }
     this.screenStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: "desktop",
-          chromeMediaSourceId: opts.sourceId,
-          maxFrameRate: 30,
-        },
-      },
+      video: { mandatory },
     });
 
     const screenTrack = this.screenStream.getVideoTracks()[0];
@@ -238,9 +261,24 @@ class Recorder {
     this.mimeType = Recorder.pickMimeType();
     this.chunks = [];
 
+    // Bitrate scaled to the actual encoded area at 30fps; hardware H.264
+    // affords a higher ceiling than software VP9/VP8.
+    const trackSettings = (screenTrack && screenTrack.getSettings()) || {};
+    const encodeDims = this.compositeDims || trackSettings;
+    const encodeW = encodeDims.width || 1920;
+    const encodeH = encodeDims.height || 1080;
+    const isH264 = /mp4|h264|avc1/i.test(this.mimeType);
+    const bpsPerPixelFrame = isH264 ? 0.12 : 0.1;
+    const minBps = isH264 ? 8_000_000 : 6_000_000;
+    const maxBps = isH264 ? 32_000_000 : 24_000_000;
+    const videoBitsPerSecond = Math.min(
+      maxBps,
+      Math.max(minBps, Math.round(encodeW * encodeH * 30 * bpsPerPixelFrame)),
+    );
+
     this.recorder = new MediaRecorder(this.stream, {
       mimeType: this.mimeType,
-      videoBitsPerSecond: 8_000_000,
+      videoBitsPerSecond,
       audioBitsPerSecond: 128_000,
     });
     this.recorder.ondataavailable = (event) => {
@@ -281,10 +319,15 @@ class Recorder {
         setTimeout(resolve, 1500); // belt and braces — don't hang forever
       });
     }
-    const srcW = video.videoWidth || 1920;
-    const srcH = video.videoHeight || 1080;
+    // Track settings are synchronous and reflect the negotiated capture size,
+    // so they can't lose the loadedmetadata race (which would silently
+    // stretch the whole recording from a 1920x1080 fallback).
+    const trackSettings =
+      (this.screenStream.getVideoTracks()[0] || { getSettings: () => ({}) }).getSettings();
+    const srcW = trackSettings.width || video.videoWidth || 1920;
+    const srcH = trackSettings.height || video.videoHeight || 1080;
 
-    // Cap the composite size so VP9 encoding stays realtime.
+    // Cap the composite size so encoding stays realtime.
     const scale = Math.min(
       1,
       MAX_COMPOSITE_WIDTH / srcW,
@@ -297,6 +340,8 @@ class Recorder {
     canvas.width = cw;
     canvas.height = ch;
     const ctx = canvas.getContext("2d", { alpha: false });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high"; // default 'low' bilinear shimmers on downscale
     this.compositeCanvas = canvas;
     this.compositeDims = { width: cw, height: ch };
 
@@ -328,11 +373,65 @@ class Recorder {
       ctx.restore();
     };
 
-    draw();
-    this.compositeTimer = setInterval(draw, Math.round(1000 / COMPOSITE_FPS));
+    // Frame-synced clock: draw only when the <video> actually receives a new
+    // capture frame (no duplicate frames burning encoder bitrate), with a
+    // slow watchdog repaint in case the source stalls. backgroundThrottling
+    // is false on the window, so rVFC keeps firing while hidden.
+    let lastDrawAt = 0;
+    const drawNow = () => {
+      draw();
+      lastDrawAt = performance.now();
+    };
+    const scheduleFrame = () => {
+      if (this.compositeSuspended || this.compositeVideo !== video) return;
+      if (this.compositeFrameHandle !== null) return;
+      this.compositeFrameHandle = video.requestVideoFrameCallback(() => {
+        this.compositeFrameHandle = null;
+        if (this.compositeSuspended || this.compositeVideo !== video) return;
+        drawNow();
+        scheduleFrame();
+      });
+    };
+    this._compositeDrawNow = drawNow;
+    this._compositeSchedule = scheduleFrame;
+    this.compositeSuspended = false;
+
+    drawNow();
+    if (typeof video.requestVideoFrameCallback === "function") {
+      scheduleFrame();
+      this.compositeTimer = setInterval(() => {
+        if (this.compositeSuspended) return;
+        if (performance.now() - lastDrawAt > 80) drawNow();
+        scheduleFrame(); // no-op if a callback is already pending
+      }, 250);
+    } else {
+      // rVFC unavailable — fall back to the old fixed-rate clock.
+      this.compositeTimer = setInterval(() => {
+        if (!this.compositeSuspended) drawNow();
+      }, Math.round(1000 / COMPOSITE_FPS));
+    }
 
     const canvasStream = canvas.captureStream(COMPOSITE_FPS);
     return canvasStream.getVideoTracks();
+  }
+
+  _suspendComposite() {
+    this.compositeSuspended = true;
+    if (
+      this.compositeVideo &&
+      this.compositeFrameHandle !== null &&
+      typeof this.compositeVideo.cancelVideoFrameCallback === "function"
+    ) {
+      this.compositeVideo.cancelVideoFrameCallback(this.compositeFrameHandle);
+    }
+    this.compositeFrameHandle = null;
+  }
+
+  _resumeComposite() {
+    if (!this.compositeVideo) return;
+    this.compositeSuspended = false;
+    if (this._compositeDrawNow) this._compositeDrawNow();
+    if (this._compositeSchedule) this._compositeSchedule();
   }
 
   pause() {
@@ -342,6 +441,7 @@ class Recorder {
     } catch {
       return;
     }
+    this._suspendComposite();
     this.pauseStartedAt = Date.now();
     this.state = "paused";
   }
@@ -353,6 +453,7 @@ class Recorder {
     } catch {
       return;
     }
+    this._resumeComposite();
     this.pausedAccumMs += Date.now() - this.pauseStartedAt;
     this.pauseStartedAt = 0;
     this.state = "recording";
@@ -424,6 +525,9 @@ class Recorder {
       clearInterval(this.compositeTimer);
       this.compositeTimer = null;
     }
+    this._suspendComposite(); // cancels any pending video-frame callback
+    this._compositeDrawNow = null;
+    this._compositeSchedule = null;
     if (this.compositeVideo) {
       try {
         this.compositeVideo.pause();

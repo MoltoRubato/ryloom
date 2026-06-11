@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -49,6 +50,67 @@ export async function r2DownloadToFile(key: string, destFile: string): Promise<v
     Readable.fromWeb(res.body as import("node:stream/web").ReadableStream),
     createWriteStream(destFile),
   );
+}
+
+/** Deletes a single R2 object — idempotent (missing keys are a success). */
+export async function r2DeleteObject(key: string): Promise<void> {
+  const res = await r2().fetch(objectUrl(key), { method: "DELETE" });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`R2 DELETE failed (${key}): HTTP ${res.status}`);
+  }
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function unescapeXml(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
+}
+
+/** Deletes every object under a prefix — mirrors apps/web/src/lib/r2.ts. */
+export async function r2DeletePrefix(prefix: string): Promise<void> {
+  const bucketUrl = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET}`;
+  let continuationToken: string | null = null;
+  do {
+    const listUrl = new URL(bucketUrl);
+    listUrl.searchParams.set("list-type", "2");
+    listUrl.searchParams.set("prefix", prefix.endsWith("/") ? prefix : `${prefix}/`);
+    listUrl.searchParams.set("max-keys", "1000");
+    if (continuationToken) listUrl.searchParams.set("continuation-token", continuationToken);
+
+    const listRes = await r2().fetch(listUrl.toString());
+    if (!listRes.ok) {
+      throw new Error(`R2 ListObjectsV2 failed (${listRes.status})`);
+    }
+    const listBody = await listRes.text();
+    // Keys arrive XML-entity-encoded — decode before re-encoding for Delete.
+    const keys = [...listBody.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => unescapeXml(m[1]!));
+    continuationToken =
+      /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(listBody)?.[1] ?? null;
+    if (keys.length === 0) break;
+
+    const deleteXml = `<Delete>${keys
+      .map((k) => `<Object><Key>${escapeXml(k)}</Key></Object>`)
+      .join("")}<Quiet>true</Quiet></Delete>`;
+    const md5 = createHash("md5").update(deleteXml).digest("base64");
+    const delRes = await r2().fetch(`${bucketUrl}?delete`, {
+      method: "POST",
+      headers: { "content-type": "application/xml", "content-md5": md5 },
+      body: deleteXml,
+    });
+    if (!delRes.ok) {
+      throw new Error(`R2 DeleteObjects failed (${delRes.status})`);
+    }
+  } while (continuationToken);
 }
 
 async function putBuffer(

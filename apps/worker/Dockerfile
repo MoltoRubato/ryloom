@@ -19,7 +19,10 @@ COPY apps/worker ./apps/worker
 # Install only the worker's dependency subtree.
 RUN pnpm install --filter @ryloom/worker... --no-frozen-lockfile
 
+# Bundle to a single file so cold boots run plain node instead of paying the
+# tsx transpile on every container start.
+RUN pnpm --filter @ryloom/worker build
+
 ENV NODE_ENV=production
 
-# pnpm places tsx in the worker package's own .bin
-CMD ["pnpm", "--filter", "@ryloom/worker", "start"]
+CMD ["node", "apps/worker/dist/index.js"]

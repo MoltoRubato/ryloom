@@ -66,11 +66,16 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
           title,
           description,
           images: thumbnail ? [{ url: thumbnail, width, height }] : undefined,
+          // Order matters: Slack (and Facebook) only render an inline player
+          // from a text/html og:video (an embeddable iframe) and take the
+          // first entry they understand, while Discord scans the list for the
+          // raw video/mp4. The iframe must come first or Slack falls back to
+          // a static image unfurl.
           videos: [
-            { url: mp4Url, secureUrl: mp4Url, type: "video/mp4", width, height },
             ...(resolved.allowEmbed
               ? [{ url: embedUrl, secureUrl: embedUrl, type: "text/html", width, height }]
               : []),
+            { url: mp4Url, secureUrl: mp4Url, type: "video/mp4", width, height },
           ],
         },
         twitter: resolved.allowEmbed

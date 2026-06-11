@@ -300,11 +300,14 @@ flag: `gcloud auth configure-docker $REGION-docker.pkg.dev` then
 ```bash
 cat > /tmp/worker-env.yaml <<'EOF'
 WORKER_DRAIN: "true"
-DRAIN_IDLE_EXIT_SECONDS: "5"
+# Stay warm for 60s after the queue empties — chained jobs (transcribe → AI)
+# land seconds later and reuse the running container instead of a cold boot.
+DRAIN_IDLE_EXIT_SECONDS: "60"
 # Stop claiming new jobs 20 min before --task-timeout so in-flight encodes
 # finish cleanly instead of being killed mid-job.
 DRAIN_MAX_RUNTIME_SECONDS: "6000"
-WORKER_CONCURRENCY: "2"
+# Keep at 1 — two concurrent x264 encodes on one box just split the cores.
+WORKER_CONCURRENCY: "1"
 WORKER_DATABASE_URL: "postgresql://postgres.YOUR-PROJECT:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres"
 SUPABASE_URL: "https://YOUR-PROJECT.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY: "eyJ..."
@@ -317,11 +320,16 @@ EOF
 
 gcloud run jobs create ryloom-worker \
   --image "$IMAGE" --region "$REGION" \
-  --cpu 2 --memory 4Gi --task-timeout 7200 --max-retries 1 \
+  --cpu 8 --memory 8Gi --task-timeout 7200 --max-retries 1 \
   --env-vars-file /tmp/worker-env.yaml
 
 rm /tmp/worker-env.yaml
 ```
+
+> **Why 8 vCPU?** x264 encode wall-time scales roughly linearly with cores,
+> and Cloud Run Jobs only bill while an execution runs — 8 cores for a
+> quarter of the time costs the same as 2 cores, but a recording is ready
+> in a quarter of the wall time.
 
 > `WORKER_DATABASE_URL` must be the **session pooler** string from step 1.3
 > (`*.pooler.supabase.com:5432`) — the direct `db.*.supabase.co` host is
@@ -481,11 +489,12 @@ The whole stack runs on **$0/month** for an internal team:
   5 GB/month egress only carries small assets now. Upgrade triggers: 500 MB
   database (heavy analytics/comments volume) → Pro $25/mo.
 - **Cloud Run Jobs**: the always-free instance-based tier (240,000 vCPU-s +
-  450,000 GiB-s/month) buys ~30 hours of 2-vCPU/4-GiB transcode time per
-  month, and idle cost is **$0** — executions only start when the queue has
-  work. Overage is ≈$0.20–0.30 per transcode-hour, so even a heavy month is
-  a few dollars. Cloud Scheduler's first 3 jobs are free (we use 1, and it
-  pings Vercel, not the billed container).
+  450,000 GiB-s/month) buys ~8 hours of 8-vCPU/8-GiB transcode time per
+  month (the same vCPU-seconds as 30+ hours at 2 vCPU — encodes just finish
+  ~4× sooner), and idle cost is **$0** — executions only start when the
+  queue has work. Overage is ≈$0.20–0.30 per transcode-hour of compute, so
+  even a heavy month is a few dollars. Cloud Scheduler's first 3 jobs are
+  free (we use 1, and it pings Vercel, not the billed container).
 - **Vercel Hobby**: fine for an internal tool dashboard. Pro if you want team
   members in the Vercel dashboard itself.
 - **AI**: Gemini AI Studio free tier covers transcription + summaries for a

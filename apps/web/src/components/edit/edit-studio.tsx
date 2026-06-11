@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  AlertTriangle,
   ArrowLeft,
   Film,
   Loader2,
@@ -12,6 +13,8 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { toast } from "sonner";
+
+import type { EditRange } from "@ryloom/db";
 
 import {
   AlertDialog,
@@ -35,6 +38,7 @@ import {
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { normalizeKeepRanges } from "@/lib/edit-ranges";
 import { type PlanLimits } from "@/lib/plans";
 import { formatDuration } from "@/lib/utils";
 import { api } from "@/trpc/react";
@@ -63,6 +67,16 @@ type EditStudioProps = {
   plan: PlanLimits;
 };
 
+/**
+ * Lifecycle of a non-destructive (background) edit:
+ * - "idle": nothing pending.
+ * - "pending": pendingEditRanges saved (or a silence/filler job queued) — the
+ *   trim is already live for viewers; the worker flattens in the background.
+ * - "failed": the background flatten failed; the trim stays applied for
+ *   viewers via pendingEditRanges, only the chip turns into a notice.
+ */
+type EditPhase = "idle" | "pending" | "failed";
+
 export function EditStudio({ data, plan }: EditStudioProps) {
   const router = useRouter();
   const video = data.video;
@@ -77,6 +91,23 @@ export function EditStudio({ data, plan }: EditStudioProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [processing, setProcessing] = useState(video.status === "processing");
 
+  // Non-destructive background edit (page may have loaded mid-flatten).
+  const [pendingEdit, setPendingEdit] = useState<EditRange[] | null>(
+    video.pendingEditRanges && video.pendingEditRanges.length > 0
+      ? normalizeKeepRanges(video.pendingEditRanges)
+      : null,
+  );
+  const [editPhase, setEditPhase] = useState<EditPhase>(
+    video.pendingEditRanges && video.pendingEditRanges.length > 0
+      ? "pending"
+      : "idle",
+  );
+  const [pendingMessage, setPendingMessage] = useState(
+    "Edit saved — finalizing in background. Viewers already see the edited video.",
+  );
+  // Ignore status data cached before the current edit started.
+  const editStartedAtRef = useRef(0);
+
   // Keep local state in line with the server row after router.refresh().
   useEffect(() => {
     setProcessing(video.status === "processing");
@@ -90,7 +121,24 @@ export function EditStudio({ data, plan }: EditStudioProps) {
     setKeepRanges([{ startMs: 0, endMs: durationMs }]);
   }, [durationMs]);
 
+  // Resync the pending-edit state from the server row after router.refresh():
+  // when the ranges were cleared server-side (e.g. a revert), drop the stale
+  // chip/banner and stop skipping ranges that no longer exist. Never while a
+  // mutation is mid-flight ("pending") — the poll owns that transition, and
+  // the prop may still predate an optimistic just-applied edit.
+  useEffect(() => {
+    if (video.pendingEditRanges && video.pendingEditRanges.length > 0) return;
+    if (editPhase === "pending") return;
+    setPendingEdit(null);
+    setEditPhase("idle");
+  }, [video.pendingEditRanges, editPhase]);
+
   // ----- Playhead sync (video -> timeline) ------------------------------------
+
+  // Ranges the studio player skips during playback: the user's draft while
+  // previewing, otherwise the pending background edit (so the owner hears
+  // exactly what viewers already see).
+  const playbackKeeps = previewCuts ? keepRanges : pendingEdit;
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -99,16 +147,16 @@ export function EditStudio({ data, plan }: EditStudioProps) {
       const element = videoRef.current;
       if (element) {
         const ms = element.currentTime * 1000;
-        // Preview mode: the timeupdate/rAF loop skips over cut ranges.
-        if (previewCuts && durationMs > 0) {
-          const inside = keepRanges.find((r) => ms >= r.startMs && ms < r.endMs);
+        // The timeupdate/rAF loop skips over cut ranges.
+        if (playbackKeeps && playbackKeeps.length > 0 && durationMs > 0) {
+          const inside = playbackKeeps.find((r) => ms >= r.startMs && ms < r.endMs);
           if (!inside) {
-            const next = keepRanges.find((r) => r.startMs > ms);
+            const next = playbackKeeps.find((r) => r.startMs > ms);
             if (next) {
               element.currentTime = next.startMs / 1000;
             } else {
               element.pause();
-              const last = keepRanges[keepRanges.length - 1];
+              const last = playbackKeeps[playbackKeeps.length - 1];
               if (last) element.currentTime = last.endMs / 1000;
             }
           }
@@ -119,7 +167,7 @@ export function EditStudio({ data, plan }: EditStudioProps) {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [isPlaying, previewCuts, keepRanges, durationMs]);
+  }, [isPlaying, playbackKeeps, durationMs]);
 
   // ----- Timeline -> video ------------------------------------------------------
 
@@ -137,14 +185,83 @@ export function EditStudio({ data, plan }: EditStudioProps) {
     (first ? first.startMs > 0 || first.endMs < durationMs : false);
   const keptMs = keptDurationMs(keepRanges);
   const editingLocked = processing || video.status !== "ready";
+  // A background edit in flight only disables the edit *actions* — the
+  // timeline, metadata cards and playback all stay usable.
+  const editInFlight = editPhase === "pending";
+
+  const beginPendingEdit = useCallback(
+    (ranges: EditRange[] | null, message: string) => {
+      editStartedAtRef.current = Date.now();
+      setPendingEdit(ranges && ranges.length > 0 ? normalizeKeepRanges(ranges) : null);
+      setPendingMessage(message);
+      setEditPhase("pending");
+    },
+    [],
+  );
 
   const trimMutation = api.video.requestTrim.useMutation({
-    onSuccess: () => {
-      toast.info("Rendering your trimmed video…");
-      setProcessing(true);
+    onSuccess: (_data, variables) => {
+      // Non-blocking: the trim is already live for viewers via
+      // pendingEditRanges; the worker flattens in the background.
+      beginPendingEdit(
+        variables.keepRanges,
+        "Trim saved — finalizing in background. Viewers already see the trimmed video.",
+      );
+      setPreviewCuts(false);
+      toast.success("Trim saved — viewers already see the trimmed video");
     },
     onError: (error) => toast.error(error.message),
   });
+
+  // ----- Background-edit polling ---------------------------------------------
+
+  const editStatusQuery = api.video.getProcessingStatus.useQuery(
+    { videoId: video.id },
+    { enabled: editInFlight, refetchInterval: editInFlight ? 4000 : false },
+  );
+
+  const editStatus = editStatusQuery.data;
+  const editStatusUpdatedAt = editStatusQuery.dataUpdatedAt;
+  useEffect(() => {
+    if (editPhase !== "pending" || !editStatus) return;
+    // Ignore data cached before this edit was requested.
+    if (editStatusUpdatedAt <= editStartedAtRef.current) return;
+    if (editStatus.editJob === "failed") {
+      // Failure semantics: pendingEditRanges stays set, so the trim keeps
+      // applying for viewers — only the chip becomes a notice.
+      if (editStatus.pendingEditRanges && editStatus.pendingEditRanges.length > 0) {
+        setPendingEdit(normalizeKeepRanges(editStatus.pendingEditRanges));
+      }
+      setEditPhase("failed");
+      return;
+    }
+    if (editStatus.editJob === null) {
+      if (editStatus.pendingEditRanges && editStatus.pendingEditRanges.length > 0) {
+        // No edit job left but the ranges were never cleared (a job exited
+        // without flattening, or an orphaned partial write). Same semantics
+        // as a failure: the ranges still apply for viewers, the user can
+        // re-trim or revert — without this the chip would spin forever.
+        setPendingEdit(normalizeKeepRanges(editStatus.pendingEditRanges));
+        setEditPhase("failed");
+        return;
+      }
+      // Flatten finished: the playback file was swapped and the pending
+      // ranges cleared in one update. Pick up the new file + duration.
+      setPendingEdit(null);
+      setEditPhase("idle");
+      setPreviewCuts(false);
+      toast.success("Edit finalized — the new video file is live");
+      router.refresh();
+      return;
+    }
+    if (editStatus.pendingEditRanges && editStatus.pendingEditRanges.length > 0) {
+      // Silence/filler jobs publish their ranges mid-job — pick them up live.
+      const next = normalizeKeepRanges(editStatus.pendingEditRanges);
+      setPendingEdit((prev) =>
+        prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next,
+      );
+    }
+  }, [editPhase, editStatus, editStatusUpdatedAt, router]);
 
   const addCutAtPlayhead = () => {
     if (durationMs <= 0 || editingLocked) return;
@@ -389,7 +506,12 @@ export function EditStudio({ data, plan }: EditStudioProps) {
                     <AlertDialogTrigger asChild>
                       <Button
                         size="sm"
-                        disabled={!hasEdits || editingLocked || trimMutation.isPending}
+                        disabled={
+                          !hasEdits ||
+                          editingLocked ||
+                          editInFlight ||
+                          trimMutation.isPending
+                        }
                       >
                         {trimMutation.isPending ? (
                           <Loader2 className="size-4 animate-spin" />
@@ -404,8 +526,9 @@ export function EditStudio({ data, plan }: EditStudioProps) {
                         <AlertDialogTitle>Apply this trim?</AlertDialogTitle>
                         <AlertDialogDescription>
                           Your video will go from {formatDuration(durationMs)} to{" "}
-                          {formatDuration(keptMs)}. The original is backed up — you can
-                          revert anytime.
+                          {formatDuration(keptMs)}. Viewers see the trimmed version
+                          immediately — the file re-renders in the background and the
+                          original stays backed up, so you can revert anytime.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
@@ -416,6 +539,23 @@ export function EditStudio({ data, plan }: EditStudioProps) {
                   </AlertDialog>
                 </div>
               </div>
+
+              {/* Background-edit status (non-blocking) */}
+              {editInFlight && (
+                <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+                  <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+                  <span>{pendingMessage}</span>
+                </div>
+              )}
+              {editPhase === "failed" && (
+                <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                  <span>
+                    Background save failed — the trim is still applied for viewers;
+                    retry from the edit menu.
+                  </span>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -424,16 +564,20 @@ export function EditStudio({ data, plan }: EditStudioProps) {
               videoId={video.id}
               workspaceId={video.workspaceId}
               enabled={plan.silenceRemoval}
-              disabled={editingLocked}
-              onJobStarted={() => setProcessing(true)}
+              disabled={editingLocked || editInFlight}
+              onJobStarted={() =>
+                beginPendingEdit(null, "Removing silences in background…")
+              }
             />
             <FillerCard
               videoId={video.id}
               workspaceId={video.workspaceId}
               enabled={plan.fillerWordRemoval}
               transcriptReady={transcriptReady}
-              disabled={editingLocked}
-              onJobStarted={() => setProcessing(true)}
+              disabled={editingLocked || editInFlight}
+              onJobStarted={() =>
+                beginPendingEdit(null, "Removing filler words in background…")
+              }
             />
           </div>
 
@@ -441,7 +585,13 @@ export function EditStudio({ data, plan }: EditStudioProps) {
             <RevertCard
               videoId={video.id}
               disabled={editingLocked}
-              onJobStarted={() => setProcessing(true)}
+              onJobStarted={() => {
+                // The revert clears pendingEditRanges server-side — drop any
+                // stale pending/failed edit state right away.
+                setPendingEdit(null);
+                setEditPhase("idle");
+                setProcessing(true);
+              }}
             />
           )}
         </div>

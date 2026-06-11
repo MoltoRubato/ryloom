@@ -1,6 +1,11 @@
 import { asc, eq } from "drizzle-orm";
 
-import { notifications, transcriptSegments, type TranscriptWord } from "@ryloom/db";
+import {
+  notifications,
+  transcriptSegments,
+  videos,
+  type TranscriptWord,
+} from "@ryloom/db";
 
 import { db } from "../db";
 import { type MsRange } from "../ffmpeg";
@@ -13,7 +18,6 @@ import {
   invertToKeepRanges,
   mergeRanges,
   reRenderWithKeepRanges,
-  restoreVideoReady,
 } from "./_shared";
 
 const FILLER_WORDS = new Set(["um", "uh", "erm", "uhm", "hmm"]);
@@ -33,9 +37,10 @@ export async function runFillerRemovalJob(
   const video = await getVideoOrThrow(job.videoId);
   if (!video.playbackUrl) throw new Error("Video has no playback MP4 to edit");
 
+  // No-op exits never touch status or pendingEditRanges — the video stayed
+  // 'ready' the whole time and no edit was ever pending.
   const transcript = await findReadyTranscript(video.id);
   if (!transcript) {
-    await restoreVideoReady(video.id);
     return { fillersRemoved: 0, reason: "no_transcript" };
   }
 
@@ -50,7 +55,6 @@ export async function runFillerRemovalJob(
     // instead of failing, and tell the owner why nothing changed.
     const reason =
       "word-level timestamps unavailable (transcribe with an OpenAI key for precise filler removal)";
-    await restoreVideoReady(video.id);
     await db.insert(notifications).values({
       userId: video.ownerId,
       type: "system",
@@ -94,16 +98,23 @@ export async function runFillerRemovalJob(
   }
 
   if (rawCuts.length === 0) {
-    await restoreVideoReady(video.id);
     return { fillersRemoved: 0 };
   }
 
   const cuts = mergeRanges(rawCuts, MERGE_GAP_MS);
   const keepRanges = invertToKeepRanges(cuts, durationMs, MIN_KEEP_MS);
   if (keepRanges.length === 0) {
-    await restoreVideoReady(video.id);
     return { fillersRemoved: 0, reason: "nothing_left_to_keep" };
   }
+
+  // Persist the keep ranges FIRST: every player applies pendingEditRanges
+  // client-side, so the cuts are visible instantly while the flatten renders
+  // in the background. The swap inside reRenderWithKeepRanges clears them
+  // atomically with the playbackUrl change.
+  await db
+    .update(videos)
+    .set({ pendingEditRanges: keepRanges, updatedAt: new Date() })
+    .where(eq(videos.id, video.id));
 
   const workDir = await createWorkDir(job.id);
   try {

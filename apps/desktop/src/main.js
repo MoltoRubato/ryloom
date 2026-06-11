@@ -556,20 +556,40 @@ function registerIpc() {
       thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: true,
     });
-    return sources.map((source) => ({
-      id: source.id,
-      name: source.name,
-      displayId: source.display_id || null,
-      thumbnailDataUrl:
-        source.thumbnail && !source.thumbnail.isEmpty()
-          ? source.thumbnail.toDataURL()
-          : null,
-      appIconDataUrl:
-        source.appIcon && !source.appIcon.isEmpty()
-          ? source.appIcon.toDataURL()
-          : null,
-      isScreen: source.id.startsWith("screen"),
-    }));
+    const displays = screen.getAllDisplays();
+    return sources.map((source) => {
+      const isScreen = source.id.startsWith("screen");
+      // Physical pixel size of the display — the renderer pins its capture
+      // constraints to this so Chromium doesn't apply its 2880x1800 default
+      // cap and downscale Retina/4K/5K captures (blurry text).
+      let captureSize = null;
+      if (isScreen) {
+        const display = displays.find(
+          (d) => String(d.id) === String(source.display_id),
+        );
+        if (display) {
+          captureSize = {
+            width: Math.round(display.bounds.width * display.scaleFactor),
+            height: Math.round(display.bounds.height * display.scaleFactor),
+          };
+        }
+      }
+      return {
+        id: source.id,
+        name: source.name,
+        displayId: source.display_id || null,
+        captureSize,
+        thumbnailDataUrl:
+          source.thumbnail && !source.thumbnail.isEmpty()
+            ? source.thumbnail.toDataURL()
+            : null,
+        appIconDataUrl:
+          source.appIcon && !source.appIcon.isEmpty()
+            ? source.appIcon.toDataURL()
+            : null,
+        isScreen,
+      };
+    });
   });
 
   ipcMain.handle("media-status", () => {

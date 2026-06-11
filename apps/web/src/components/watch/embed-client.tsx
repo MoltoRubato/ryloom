@@ -173,6 +173,7 @@ function EmbedPlayer({
         watermarkEmail={data.watermarkEmail}
         cta={data.video.cta}
         brandColor={data.workspace?.brandColor}
+        keepRanges={data.video.pendingEditRanges}
         onEvent={(type, playheadMs) => track(type, playheadMs)}
         className="h-full rounded-none"
       />
