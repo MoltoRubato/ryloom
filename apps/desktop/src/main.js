@@ -251,7 +251,7 @@ function showMainWindow() {
   win.focus();
 }
 
-function openBubble(deviceId, size, frame) {
+function openBubble(deviceId, size, frame, cameraBg) {
   closeBubble();
   const bubbleSize = clampBubbleSize(size);
   const { workArea } = screen.getPrimaryDisplay();
@@ -282,7 +282,11 @@ function openBubble(deviceId, size, frame) {
   bubbleWindow.setAlwaysOnTop(true, "floating");
   bubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   bubbleWindow.loadFile(path.join(__dirname, "renderer", "bubble.html"), {
-    query: { deviceId: deviceId || "", frame: frame || "circle" },
+    query: {
+      deviceId: deviceId || "",
+      frame: frame || "circle",
+      cameraBg: cameraBg || "none",
+    },
   });
   bubbleWindow.on("closed", () => {
     bubbleWindow = null;
@@ -645,11 +649,12 @@ function registerIpc() {
   });
 
   ipcMain.handle("bubble-open", (_event, payload) => {
-    const { deviceId, size, frame } = payload || {};
+    const { deviceId, size, frame, cameraBg } = payload || {};
     openBubble(
       typeof deviceId === "string" ? deviceId : "",
       size,
       typeof frame === "string" ? frame : "circle",
+      typeof cameraBg === "string" ? cameraBg : "none",
     );
     return true;
   });

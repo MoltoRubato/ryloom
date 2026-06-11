@@ -34,6 +34,7 @@ import {
   type BubbleSize,
   type RecordingMode,
 } from "@/lib/recorder/engine";
+import { type CanvasScene } from "@/lib/recorder/canvas-scene";
 import { type RecorderEffects } from "@/lib/recorder/effects";
 import { type PlanLimits } from "@/lib/plans";
 import { cn } from "@/lib/utils";
@@ -50,6 +51,7 @@ export type RecorderSettings = {
   bubbleSize: BubbleSize;
   countdownEnabled: boolean;
   effects: RecorderEffects;
+  canvas: CanvasScene;
 };
 
 const MODES: Array<{
@@ -508,7 +510,7 @@ export function SetupPanel({
           >
             <Sparkles className="h-4 w-4 text-muted-foreground" />
             Effects
-            {settings.effects.background !== "none" && (
+            {(settings.effects.cameraBackground !== "none" || settings.canvas.enabled) && (
               <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-primary" />
             )}
           </Button>

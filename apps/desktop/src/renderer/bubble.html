@@ -2,9 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- blob:/wasm-unsafe-eval/worker-src allow the MediaPipe segmentation
+         runtime (camera backgrounds) to load from local node_modules bytes. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; img-src 'self' data:"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' blob: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; img-src 'self' data: blob:; connect-src 'self' blob: data:; worker-src 'self' blob:"
     />
     <title>Ryloom camera</title>
     <style>
@@ -64,13 +66,26 @@
         height: 100%;
       }
 
-      video {
+      video,
+      canvas.cam {
         width: 100%;
         height: 100%;
         object-fit: cover;
         /* Mirror like a real selfie camera. */
         transform: scaleX(-1);
         background: #17151f;
+      }
+
+      /* The processed (background-replaced) view paints onto the canvas;
+         the raw video stays hidden underneath as the segmenter's source. */
+      canvas.cam {
+        position: absolute;
+        inset: 0;
+        display: none;
+      }
+
+      .bubble.processed canvas.cam {
+        display: block;
       }
 
       .error {
@@ -147,6 +162,7 @@
   <body>
     <div class="bubble">
       <video id="cam" autoplay playsinline muted></video>
+      <canvas id="cam-out" class="cam"></canvas>
       <div class="error" id="error">Camera unavailable</div>
       <div class="controls">
         <button id="size-s" title="Small">S</button>
@@ -158,10 +174,14 @@
 
     <script>
       const { ipcRenderer } = require("electron");
+      const fs = require("fs");
+      const path = require("path");
 
       const SIZES = { s: 160, m: 220, l: 320 };
       const params = new URLSearchParams(window.location.search);
       const deviceId = params.get("deviceId") || "";
+      // Camera background (Effects → Backgrounds): none | blur | <painter id>.
+      const cameraBg = params.get("cameraBg") || "none";
 
       const frame = params.get("frame") || "circle";
       if (frame !== "circle") {
@@ -194,6 +214,192 @@
         }
         errorEl.classList.remove("visible");
         video.srcObject = stream;
+        if (cameraBg !== "none") startBackgroundEffect();
+      }
+
+      // ----------------------------------------------------------------------
+      // Camera background — person segmentation (MediaPipe), Loom/Meet-style.
+      // The bubble window is what gets captured into the recording, so painting
+      // the effect here changes both the preview AND the recorded video.
+      // Runtime + model load from local bytes (no network, asar-friendly).
+      // ----------------------------------------------------------------------
+
+      // Replacement wallpapers — ids match the swatches in the Effects panel.
+      function paintGlow(ctx, x, y, radius, color) {
+        const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+        glow.addColorStop(0, color);
+        glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      }
+
+      function linear(ctx, w, h, stops, vertical) {
+        const g = vertical
+          ? ctx.createLinearGradient(0, 0, 0, h)
+          : ctx.createLinearGradient(0, 0, w, h);
+        for (const [offset, color] of stops) g.addColorStop(offset, color);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      const BG_PAINTERS = {
+        aurora(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#16102e"], [1, "#2c1f5e"]]);
+          paintGlow(ctx, w * 0.22, h * 0.18, Math.max(w, h) * 0.5, "rgba(98, 93, 245, 0.5)");
+          paintGlow(ctx, w * 0.85, h * 0.85, Math.max(w, h) * 0.45, "rgba(62, 207, 142, 0.32)");
+        },
+        sunset(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#ff7e5f"], [1, "#feb47b"]]);
+          paintGlow(ctx, w * 0.8, h * 0.15, Math.max(w, h) * 0.5, "rgba(255, 94, 158, 0.45)");
+        },
+        ocean(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#0f2027"], [0.5, "#203a43"], [1, "#2c5364"]], true);
+          paintGlow(ctx, w * 0.75, h * 0.25, Math.max(w, h) * 0.45, "rgba(64, 196, 255, 0.3)");
+        },
+        candy(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#fc5c7d"], [1, "#6a82fb"]]);
+        },
+        forest(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#0b3d2e"], [1, "#1d976c"]]);
+          paintGlow(ctx, w * 0.2, h * 0.8, Math.max(w, h) * 0.5, "rgba(56, 239, 125, 0.28)");
+        },
+        slate(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#1f1c2c"], [1, "#4e54c8"]]);
+        },
+        graphite(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#1b1924"], [1, "#2e2b3a"]], true);
+        },
+        lavender(ctx, w, h) {
+          linear(ctx, w, h, [[0, "#b993d6"], [1, "#8ca6db"]]);
+        },
+      };
+
+      async function createSegmenter() {
+        const vision = require("@mediapipe/tasks-vision");
+        const wasmDir = path.dirname(
+          require.resolve("@mediapipe/tasks-vision/vision_wasm_internal.js"),
+        );
+        // file:// pages can't fetch file:// — hand the runtime over as blobs.
+        const loaderUrl = URL.createObjectURL(
+          new Blob([fs.readFileSync(path.join(wasmDir, "vision_wasm_internal.js"))], {
+            type: "text/javascript",
+          }),
+        );
+        const wasmUrl = URL.createObjectURL(
+          new Blob([fs.readFileSync(path.join(wasmDir, "vision_wasm_internal.wasm"))], {
+            type: "application/wasm",
+          }),
+        );
+        const model = fs.readFileSync(path.join(__dirname, "models", "selfie_segmenter.tflite"));
+        const fileset = { wasmLoaderPath: loaderUrl, wasmBinaryPath: wasmUrl };
+        const create = (delegate) =>
+          vision.ImageSegmenter.createFromOptions(fileset, {
+            baseOptions: { modelAssetBuffer: new Uint8Array(model), delegate },
+            runningMode: "VIDEO",
+            outputCategoryMask: false,
+            outputConfidenceMasks: true,
+          });
+        try {
+          return await create("GPU");
+        } catch {
+          return await create("CPU");
+        }
+      }
+
+      async function startBackgroundEffect() {
+        let segmenter;
+        try {
+          segmenter = await createSegmenter();
+        } catch (err) {
+          console.warn("[bubble] camera background unavailable:", err);
+          return; // keep the raw video visible
+        }
+
+        const out = document.getElementById("cam-out");
+        const octx = out.getContext("2d");
+        const person = document.createElement("canvas");
+        const pctx = person.getContext("2d");
+        const maskCanvas = document.createElement("canvas");
+        const mctx = maskCanvas.getContext("2d");
+        let maskImage = null;
+        let hasMask = false;
+        let lastVideoTime = -1;
+
+        document.querySelector(".bubble").classList.add("processed");
+
+        function captureMask(result) {
+          const mask = result.confidenceMasks && result.confidenceMasks[0];
+          if (!mask) return;
+          const values = mask.getAsFloat32Array();
+          if (maskCanvas.width !== mask.width || maskCanvas.height !== mask.height) {
+            maskCanvas.width = mask.width;
+            maskCanvas.height = mask.height;
+            maskImage = null;
+          }
+          if (!maskImage) maskImage = mctx.createImageData(mask.width, mask.height);
+          const pixels = maskImage.data;
+          for (let i = 0; i < values.length; i++) {
+            pixels[i * 4 + 3] = values[i] * 255;
+          }
+          mctx.putImageData(maskImage, 0, 0);
+          hasMask = true;
+        }
+
+        function draw() {
+          if (video.readyState < 2 || !video.videoWidth) return;
+          const w = video.videoWidth;
+          const h = video.videoHeight;
+          if (out.width !== w || out.height !== h) {
+            out.width = w;
+            out.height = h;
+            person.width = w;
+            person.height = h;
+          }
+
+          if (video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime;
+            try {
+              segmenter.segmentForVideo(video, performance.now(), captureMask);
+            } catch {
+              /* keep the previous mask this frame */
+            }
+          }
+
+          if (!hasMask) {
+            octx.drawImage(video, 0, 0, w, h);
+            return;
+          }
+
+          // 1. Background layer: blurred room or replacement wallpaper.
+          if (cameraBg === "blur") {
+            const radius = Math.max(8, Math.round(w / 60));
+            octx.save();
+            octx.filter = `blur(${radius}px)`;
+            octx.drawImage(video, -radius * 2, -radius * 2, w + radius * 4, h + radius * 4);
+            octx.restore();
+          } else {
+            const painter = BG_PAINTERS[cameraBg];
+            if (!painter) {
+              octx.drawImage(video, 0, 0, w, h);
+              return;
+            }
+            painter(octx, w, h);
+          }
+
+          // 2. Person layer, cut out by the feathered confidence mask.
+          pctx.clearRect(0, 0, w, h);
+          pctx.drawImage(video, 0, 0, w, h);
+          pctx.save();
+          pctx.globalCompositeOperation = "destination-in";
+          pctx.filter = `blur(${Math.max(2, Math.round(w / 320))}px)`;
+          pctx.drawImage(maskCanvas, 0, 0, w, h);
+          pctx.restore();
+          octx.drawImage(person, 0, 0, w, h);
+        }
+
+        // backgroundThrottling is off for this window, so the loop keeps
+        // painting (and being captured) even when the bubble isn't focused.
+        setInterval(draw, 1000 / 30);
       }
 
       function markActiveSize(activeId) {

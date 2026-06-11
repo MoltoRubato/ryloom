@@ -1210,6 +1210,11 @@ body {
   gap: 10px;
 }
 
+/* Canvas pane stacks the wallpaper grid above the padding/corner rows. */
+#effects-pane-canvas .swatch-grid {
+  margin-bottom: 16px;
+}
+
 .swatch {
   appearance: none;
   border: 2px solid var(--border);

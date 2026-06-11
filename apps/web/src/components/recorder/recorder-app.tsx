@@ -11,6 +11,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { probePageInStream } from "@/lib/recorder/capture-probe";
+import {
+  applyCanvasTemplate,
+  DEFAULT_CANVAS_SCENE,
+  type CanvasScene,
+  type CanvasTemplate,
+} from "@/lib/recorder/canvas-scene";
 import { DEFAULT_EFFECTS } from "@/lib/recorder/effects";
 import {
   cornerToPosition,
@@ -21,6 +27,12 @@ import {
   type BubbleSize,
   type RecordingMode,
 } from "@/lib/recorder/engine";
+import {
+  isDocumentPipSupported,
+  openPipBubble,
+  registerAutoPip,
+  type PipBubbleHandle,
+} from "@/lib/recorder/pip-bubble";
 import {
   clear as clearRecovery,
   listUnfinished,
@@ -33,6 +45,7 @@ import { formatDuration } from "@/lib/utils";
 import { api } from "@/trpc/react";
 
 import { CameraBubble } from "./camera-bubble";
+import { CanvasStage } from "./canvas-stage";
 import { CountdownOverlay } from "./countdown-overlay";
 import { EffectsPanel } from "./effects-panel";
 import { PermissionDialog } from "./permission-dialog";
@@ -134,6 +147,7 @@ export function RecorderApp() {
     bubbleSize: 220,
     countdownEnabled: true,
     effects: DEFAULT_EFFECTS,
+    canvas: DEFAULT_CANVAS_SCENE,
   }));
 
   const [phase, setPhase] = useState<Phase>("setup");
@@ -156,6 +170,8 @@ export function RecorderApp() {
   const [bubbleBurned, setBubbleBurned] = useState(false);
   // The user hid the camera from the bubble's hover controls.
   const [bubbleHidden, setBubbleHidden] = useState(false);
+  // The bubble lives in an always-on-top PiP window (visible across tabs).
+  const [pipActive, setPipActive] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [effectsOpen, setEffectsOpen] = useState(false);
   const [permissionIssue, setPermissionIssue] = useState<RecorderAcquireError | null>(null);
@@ -167,6 +183,10 @@ export function RecorderApp() {
   const phaseRef = useRef<Phase>("setup");
   const sessionRef = useRef<ActiveSession | null>(null);
   const titleRef = useRef(title);
+  const pipRef = useRef<PipBubbleHandle | null>(null);
+  const bubbleBurnedRef = useRef(false);
+  const bubbleHiddenRef = useRef(false);
+  const settingsRef = useRef(settings);
   const stoppingRef = useRef(false);
   const warnedRef = useRef(false);
   /** Recovery key to also clear when it differs from the active sessionId. */
@@ -183,9 +203,25 @@ export function RecorderApp() {
   useEffect(() => {
     titleRef.current = title;
   }, [title]);
+  useEffect(() => {
+    bubbleBurnedRef.current = bubbleBurned;
+  }, [bubbleBurned]);
+  useEffect(() => {
+    bubbleHiddenRef.current = bubbleHidden;
+  }, [bubbleHidden]);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const handleSettingsChange = useCallback((patch: Partial<RecorderSettings>) => {
     setSettings((current) => ({ ...current, ...patch }));
+  }, []);
+
+  /** Closes the PiP bubble window (if any) and resets its state. */
+  const closePip = useCallback(() => {
+    pipRef.current?.close();
+    pipRef.current = null;
+    setPipActive(false);
   }, []);
 
   // --- Bubble + effects (live-wired into the engine) ----------------------------
@@ -200,33 +236,115 @@ export function RecorderApp() {
     (size: BubbleSize) => {
       handleSettingsChange({ bubbleSize: size });
       engineRef.current?.setBubbleSize(size);
+      pipRef.current?.setSize(size);
     },
     [handleSettingsChange],
   );
 
   const hideBubble = useCallback(() => {
     setBubbleHidden(true);
+    bubbleHiddenRef.current = true;
+    closePip();
     // No bubble on screen and none composited — the camera is out of the
     // recording until "Show camera" brings it back.
     engineRef.current?.setBubbleCompositing(false);
-  }, []);
+  }, [closePip]);
 
   const showBubble = useCallback(() => {
     setBubbleHidden(false);
+    bubbleHiddenRef.current = false;
     // When the bubble is burned into the capture, showing the DOM bubble is
     // enough — compositing a second one would double it.
     engineRef.current?.setBubbleCompositing(!bubbleBurned);
   }, [bubbleBurned]);
+
+  /**
+   * Pops the self-view into an always-on-top Document PiP window so it stays
+   * visible across tabs and apps (desktop-app parity). Called right after
+   * capture starts, by Chrome's auto-PiP when the presenter switches tabs,
+   * and from the bubble's pop-out button.
+   */
+  const openPip = useCallback(async () => {
+    const engine = engineRef.current;
+    if (!engine || pipRef.current?.isOpen || bubbleHiddenRef.current) return;
+    const current = settingsRef.current;
+    if (current.mode !== "screen_camera") return;
+    const handle = await openPipBubble({
+      stream: engine.cameraPreviewStream,
+      frame: current.effects.frame,
+      size: current.bubbleSize,
+      onCorner: (corner) => handleBubbleMove(cornerToPosition(corner)),
+      onSizeChange: handleBubbleResize,
+      onHide: hideBubble,
+      onClosed: () => {
+        pipRef.current = null;
+        setPipActive(false);
+        // Back to the in-page bubble — restore the probed compositing rule.
+        engineRef.current?.setBubbleCompositing(
+          !bubbleBurnedRef.current && !bubbleHiddenRef.current,
+        );
+      },
+    });
+    if (!handle) return;
+    pipRef.current = handle;
+    setPipActive(true);
+    // A monitor capture physically records the floating PiP window, so the
+    // engine must not composite a second bubble. Tab/window captures never
+    // see the PiP window — the composite stays on for those.
+    engine.setBubbleCompositing(
+      engine.screenDisplaySurface !== "monitor" && !bubbleHiddenRef.current,
+    );
+  }, [handleBubbleMove, handleBubbleResize, hideBubble]);
 
   const handleEffectsChange = useCallback(
     (patch: Partial<RecorderSettings["effects"]>) => {
       setSettings((current) => {
         const effects = { ...current.effects, ...patch };
         engineRef.current?.setEffects(effects);
+        pipRef.current?.setFrame(effects.frame);
         return { ...current, effects };
       });
     },
     [],
+  );
+
+  // --- Canvas (Effects → Canvas): scene + stage text edits, live-wired -----------
+
+  const handleCanvasChange = useCallback((scene: CanvasScene) => {
+    setSettings((current) => {
+      engineRef.current?.setCanvasScene(scene);
+      return { ...current, canvas: scene };
+    });
+  }, []);
+
+  const handleCanvasText = useCallback((key: string, value: string) => {
+    setSettings((current) => {
+      const scene = {
+        ...current.canvas,
+        texts: { ...current.canvas.texts, [key]: value },
+      };
+      engineRef.current?.setCanvasScene(scene);
+      return { ...current, canvas: scene };
+    });
+  }, []);
+
+  const handleApplyTemplate = useCallback(
+    (template: CanvasTemplate) => {
+      setSettings((current) => {
+        const scene = applyCanvasTemplate(current.canvas, template);
+        engineRef.current?.setCanvasScene(scene);
+        return { ...current, canvas: scene };
+      });
+      if (template.centersBubble) {
+        // The Bubble template parks the camera big and centered on the canvas.
+        const center = { x: 0.5, y: 0.52 };
+        setBubblePos(center);
+        engineRef.current?.setBubblePosition(center);
+        handleSettingsChange({ bubbleSize: 320 });
+        engineRef.current?.setBubbleSize(320);
+      }
+    },
+    [handleSettingsChange],
   );
 
   // --- Teardown helpers -------------------------------------------------------
@@ -237,6 +355,7 @@ export function RecorderApp() {
       const engine = engineRef.current;
       engineRef.current = null;
       engine?.destroy();
+      closePip();
       setCameraPreview(null);
       setBubbleHidden(false);
       setBubbleBurned(false);
@@ -258,7 +377,7 @@ export function RecorderApp() {
       setPhase("setup");
       if (!silent) toast.info("Recording discarded.");
     },
-    [cancelSessionAsync],
+    [cancelSessionAsync, closePip],
   );
 
   // Release camera/mic/screen if the user navigates away mid-flow.
@@ -266,6 +385,8 @@ export function RecorderApp() {
     return () => {
       engineRef.current?.destroy();
       engineRef.current = null;
+      pipRef.current?.close();
+      pipRef.current = null;
     };
   }, []);
 
@@ -277,6 +398,7 @@ export function RecorderApp() {
     if (!engine) return;
     stoppingRef.current = true;
     setPhase("stopping");
+    closePip();
     try {
       const blob = await engine.stop();
       const elapsed = Math.round(engine.getElapsedMs());
@@ -309,7 +431,7 @@ export function RecorderApp() {
     } finally {
       stoppingRef.current = false;
     }
-  }, [cancelSessionAsync]);
+  }, [cancelSessionAsync, closePip]);
 
   useEffect(() => {
     stopRecordingRef.current = stopRecording;
@@ -330,6 +452,7 @@ export function RecorderApp() {
         bubblePosition: initialBubblePos,
         bubbleSize: settings.bubbleSize,
         effects: settings.effects,
+        canvasScene: settings.canvas,
         mimeType: active.mimeType,
         onChunk: (chunk, seq) => {
           void saveChunk(active.sessionId, seq, chunk).catch(() => undefined);
@@ -348,6 +471,7 @@ export function RecorderApp() {
           toast.error(error.message || "The recording hit an unexpected error.");
           if (phaseRef.current === "recording") void stopRecordingRef.current();
         },
+        onEffectsWarning: (message) => toast.warning(message),
       });
       engineRef.current = engine;
 
@@ -396,7 +520,16 @@ export function RecorderApp() {
         engine.setBubbleCompositing(!burned);
       }
       setBubbleBurned(burned);
+      bubbleBurnedRef.current = burned;
       console.debug("[recorder] bubble mode:", burned ? "burned-in page bubble" : "composited");
+
+      // Always-on-top self-view: pop the bubble out immediately when the
+      // share flow was quick enough to keep the click's activation alive.
+      // Otherwise Chrome's auto-PiP (registered below) opens it on tab
+      // switch, and the bubble's pop-out button always works.
+      if (settings.mode === "screen_camera" && isDocumentPipSupported()) {
+        void openPip();
+      }
 
       setHasMic(settings.micEnabled);
       setMicOn(settings.micEnabled);
@@ -416,7 +549,7 @@ export function RecorderApp() {
         }
       }
     },
-    [settings, discardActive],
+    [settings, discardActive, openPip],
   );
 
   const startRecording = useCallback(async () => {
@@ -581,6 +714,17 @@ export function RecorderApp() {
     }, 200);
     return () => window.clearInterval(id);
   }, [phase]);
+
+  // Auto-PiP: while recording with the bubble, Chrome fires the
+  // "enterpictureinpicture" media-session action when the presenter switches
+  // tabs — we pop the bubble out so it stays visible at all times, even when
+  // the immediate attempt at start was blocked for lack of a fresh gesture.
+  useEffect(() => {
+    if (phase !== "recording" && phase !== "countdown") return;
+    if (settings.mode !== "screen_camera") return;
+    if (!isDocumentPipSupported()) return;
+    return registerAutoPip(() => void openPip());
+  }, [phase, settings.mode, openPip]);
 
   // Warn before closing the tab while capture is in flight (the preview panel
   // covers the upload phase itself).
@@ -774,10 +918,17 @@ export function RecorderApp() {
   const remainingMs = limitMs !== null ? Math.max(0, limitMs - elapsedMs) : null;
   const noWorkspace = workspaceList.isSuccess && (workspaceList.data?.length ?? 0) === 0;
   const isCapturePhase = phase === "countdown" || phase === "recording" || phase === "stopping";
+  // The Loom-style canvas page: the recording backdrop in camera mode. Shown
+  // from setup on so the presenter can pick templates and edit text on it.
+  const stageShown =
+    settings.mode === "camera" &&
+    settings.canvas.enabled &&
+    (phase === "setup" || phase === "starting" || phase === "countdown" || phase === "recording");
 
   return (
     <div className="relative flex min-h-dvh flex-col">
-      <header className="flex items-center justify-between gap-4 px-4 py-4 sm:px-6">
+      {stageShown && <CanvasStage scene={settings.canvas} onTextChange={handleCanvasText} />}
+      <header className="relative z-10 flex items-center justify-between gap-4 px-4 py-4 sm:px-6">
         <Button
           asChild
           variant="ghost"
@@ -799,9 +950,13 @@ export function RecorderApp() {
         ) : null}
       </header>
 
-      <main className="flex flex-1 flex-col px-4 pt-2 pb-28 sm:px-6">
+      <main
+        className={`relative z-10 flex flex-1 flex-col px-4 pt-2 pb-28 sm:px-6 ${
+          stageShown ? "pointer-events-none" : ""
+        }`}
+      >
         {(phase === "setup" || phase === "starting") && (
-          <div className="mx-auto w-full max-w-xl space-y-5">
+          <div className="pointer-events-auto mx-auto w-full max-w-xl space-y-5">
             <div className="space-y-1.5 text-center">
               <h1 className="text-2xl font-bold tracking-tight">New recording</h1>
               <p className="text-sm text-muted-foreground">
@@ -843,7 +998,7 @@ export function RecorderApp() {
         )}
 
         {isCapturePhase && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+          <div className="pointer-events-auto flex flex-1 flex-col items-center justify-center gap-6 text-center">
             {phase === "stopping" ? (
               <>
                 <Loader2 className="h-9 w-9 animate-spin text-primary" />
@@ -855,7 +1010,9 @@ export function RecorderApp() {
                 </div>
               </>
             ) : settings.mode === "camera" ? (
-              <LiveCameraStage stream={cameraPreview} paused={paused} />
+              settings.canvas.enabled ? null : (
+                <LiveCameraStage stream={cameraPreview} paused={paused} />
+              )
             ) : (
               <>
                 <div className="relative flex h-20 w-20 items-center justify-center rounded-2xl border border-border bg-card/60 shadow-sm">
@@ -916,10 +1073,14 @@ export function RecorderApp() {
 
       {/* The draggable self-view bubble — visible from the countdown on, so
           you can place it before the take starts. Dragging it moves the
-          recorded bubble in lockstep. */}
+          recorded bubble in lockstep. Hidden while the PiP window holds it.
+          In camera mode it appears when a canvas backdrop is active (the
+          camera floats over the canvas instead of filling the frame). */}
       {(phase === "countdown" || phase === "recording") &&
-        settings.mode === "screen_camera" &&
-        !bubbleHidden && (
+        (settings.mode === "screen_camera" ||
+          (settings.mode === "camera" && settings.canvas.enabled)) &&
+        !bubbleHidden &&
+        !pipActive && (
           <CameraBubble
             stream={cameraPreview}
             position={bubblePos}
@@ -928,6 +1089,11 @@ export function RecorderApp() {
             onPositionChange={handleBubbleMove}
             onSizeChange={handleBubbleResize}
             onHide={hideBubble}
+            onPopOut={
+              settings.mode === "screen_camera" && isDocumentPipSupported()
+                ? () => void openPip()
+                : undefined
+            }
           />
         )}
 
@@ -946,7 +1112,11 @@ export function RecorderApp() {
           onCancel={() => void discardActive()}
           onToggleNotes={() => setNotesOpen((open) => !open)}
           onShowCamera={
-            settings.mode === "screen_camera" && bubbleHidden ? showBubble : undefined
+            (settings.mode === "screen_camera" ||
+              (settings.mode === "camera" && settings.canvas.enabled)) &&
+            bubbleHidden
+              ? showBubble
+              : undefined
           }
         />
       )}
@@ -958,6 +1128,10 @@ export function RecorderApp() {
         onOpenChange={setEffectsOpen}
         effects={settings.effects}
         onChange={handleEffectsChange}
+        canvasScene={settings.canvas}
+        onCanvasChange={handleCanvasChange}
+        onApplyTemplate={handleApplyTemplate}
+        mode={settings.mode}
       />
 
       <PermissionDialog

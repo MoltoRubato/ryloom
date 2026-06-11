@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { PictureInPicture2, X } from "lucide-react";
 
 import { type BubblePosition, type BubbleSize, BUBBLE_SIZES } from "@/lib/recorder/engine";
 import { type BubbleFrame, FRAME_GRADIENT_STOPS } from "@/lib/recorder/effects";
@@ -23,6 +23,7 @@ export function CameraBubble({
   onPositionChange,
   onSizeChange,
   onHide,
+  onPopOut,
 }: {
   stream: MediaStream | null;
   /** Normalized bubble center (0..1 of the viewport — and of the recording). */
@@ -33,6 +34,8 @@ export function CameraBubble({
   onSizeChange: (size: BubbleSize) => void;
   /** Hides the bubble AND removes the camera from the recording. */
   onHide?: () => void;
+  /** Pops the bubble out into an always-on-top PiP window. */
+  onPopOut?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
@@ -159,6 +162,16 @@ export function CameraBubble({
             {SIZE_LABELS[candidate]}
           </button>
         ))}
+        {onPopOut && (
+          <button
+            type="button"
+            onClick={onPopOut}
+            title="Keep on top — pop the bubble out so it stays visible across tabs and apps"
+            className="flex h-6 w-6 items-center justify-center rounded-full text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+          >
+            <PictureInPicture2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         {onHide && (
           <button
             type="button"

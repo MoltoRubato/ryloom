@@ -9,8 +9,13 @@
  * client event handlers/effects.
  */
 
+import { CameraBackgroundProcessor } from "./camera-background";
 import {
-  BACKGROUND_PAINTERS,
+  DEFAULT_CANVAS_SCENE,
+  paintCanvasScene,
+  type CanvasScene,
+} from "./canvas-scene";
+import {
   DEFAULT_EFFECTS,
   FRAME_GRADIENT_STOPS,
   PADDING_FRACTIONS,
@@ -139,14 +144,18 @@ export type RecorderEngineConfig = {
   /** Initial bubble center, normalized to the output frame. */
   bubblePosition: BubblePosition;
   bubbleSize: BubbleSize;
-  /** Background / canvas / bubble-frame effects (desktop-app parity). */
+  /** Camera background / bubble-frame / inset effects (desktop-app parity). */
   effects: RecorderEffects;
+  /** Loom-style canvas backdrop (Effects → Canvas). */
+  canvasScene?: CanvasScene;
   mimeType: string;
   /** Fires once per ~1s timeslice with the chunk and its sequence number. */
   onChunk: (chunk: Blob, seq: number) => void;
   /** The user clicked the browser's native "Stop sharing" — auto-stop. */
   onScreenShareEnded?: () => void;
   onError?: (error: Error) => void;
+  /** Non-fatal effect problems (e.g. the segmentation model failed to load). */
+  onEffectsWarning?: (message: string) => void;
 };
 
 export class RecorderEngine {
@@ -173,6 +182,9 @@ export class RecorderEngine {
   private bubblePosition: BubblePosition;
   private bubbleSize: BubbleSize;
   private effects: RecorderEffects;
+  private canvasScene: CanvasScene;
+  /** Applies Clear/Blur/replacement backgrounds to the camera stream. */
+  private cameraProcessor: CameraBackgroundProcessor | null = null;
   /**
    * Whether drawCompositeFrame paints the camera bubble. Turned off when the
    * in-page bubble is itself part of the captured pixels (probed at start) —
@@ -201,6 +213,7 @@ export class RecorderEngine {
     this.bubblePosition = config.bubblePosition;
     this.bubbleSize = config.bubbleSize;
     this.effects = config.effects ?? DEFAULT_EFFECTS;
+    this.canvasScene = config.canvasScene ?? DEFAULT_CANVAS_SCENE;
     this.micOn = config.micEnabled;
   }
 
@@ -217,9 +230,12 @@ export class RecorderEngine {
     return this.actualMimeType;
   }
 
-  /** Live camera stream for the on-page self-view bubble (preview only). */
+  /**
+   * Live camera stream for self-views (in-page bubble, PiP bubble, stage).
+   * Already background-processed, so previews match the recording exactly.
+   */
   get cameraPreviewStream(): MediaStream | null {
-    return this.cameraStream;
+    return this.cameraProcessor?.stream ?? this.cameraStream;
   }
 
   /** Raw screen stream — used by the self-view capture probe before start(). */
@@ -291,6 +307,17 @@ export class RecorderEngine {
         this.releaseMedia();
         throw toAcquireError("camera", error);
       }
+      // Every camera consumer (bubble, PiP, recording) sees the processed
+      // stream, so Clear/Blur/replacement switches live everywhere at once.
+      this.cameraProcessor = new CameraBackgroundProcessor(
+        this.cameraStream,
+        this.effects.cameraBackground,
+      );
+      this.cameraProcessor.onLoadError = () => {
+        this.config.onEffectsWarning?.(
+          "Camera backgrounds aren't available right now — the segmentation model couldn't load.",
+        );
+      };
     }
 
     if (this.config.micEnabled) {
@@ -333,21 +360,31 @@ export class RecorderEngine {
 
   private async buildVideoTrack(): Promise<MediaStreamTrack | null> {
     const { mode } = this.config;
-    if (mode === "camera") return this.cameraStream?.getVideoTracks()[0] ?? null;
-    // Plain screen capture stays a zero-cost raw track unless a background
-    // effect needs the canvas compositor.
-    if (mode === "screen" && this.effects.background === "none") {
-      return this.screenStream?.getVideoTracks()[0] ?? null;
-    }
 
-    // Composite the camera bubble and/or background effect over the screen on
-    // an offscreen canvas sized to the captured screen.
-    if (!this.screenStream) return null;
-    if (mode === "screen_camera" && !this.cameraStream) return null;
-    const screenTrack = this.screenStream.getVideoTracks()[0];
-    const settings = screenTrack?.getSettings();
-    const width = Math.max(2, Math.round(settings?.width ?? 1920));
-    const height = Math.max(2, Math.round(settings?.height ?? 1080));
+    // Camera-only always composites (16:9 frame) so the Loom-style canvas
+    // backdrop can be toggled/edited live at any point of the recording.
+    let width: number;
+    let height: number;
+    if (mode === "camera") {
+      if (!this.cameraStream) return null;
+      width = 1920;
+      height = 1080;
+    } else {
+      // Plain screen capture stays a zero-cost raw track unless the canvas
+      // backdrop needs the compositor at start.
+      if (mode === "screen" && !this.canvasScene.enabled) {
+        return this.screenStream?.getVideoTracks()[0] ?? null;
+      }
+
+      // Composite the camera bubble and/or canvas backdrop over the screen on
+      // an offscreen canvas sized to the captured screen.
+      if (!this.screenStream) return null;
+      if (mode === "screen_camera" && !this.cameraStream) return null;
+      const screenTrack = this.screenStream.getVideoTracks()[0];
+      const settings = screenTrack?.getSettings();
+      width = Math.max(2, Math.round(settings?.width ?? 1920));
+      height = Math.max(2, Math.round(settings?.height ?? 1080));
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -363,8 +400,12 @@ export class RecorderEngine {
     this.canvas = canvas;
     this.canvasCtx = ctx;
 
-    this.screenVideo = await this.attachHiddenVideo(this.screenStream);
-    if (this.cameraStream) {
+    if (this.screenStream) {
+      this.screenVideo = await this.attachHiddenVideo(this.screenStream);
+    }
+    if (this.cameraProcessor) {
+      this.cameraVideo = await this.attachHiddenVideo(this.cameraProcessor.stream);
+    } else if (this.cameraStream) {
       this.cameraVideo = await this.attachHiddenVideo(this.cameraStream);
     }
 
@@ -397,66 +438,87 @@ export class RecorderEngine {
   private drawCompositeFrame(): void {
     const canvas = this.canvas;
     const ctx = this.canvasCtx;
-    const screenVideo = this.screenVideo;
-    if (!canvas || !ctx || !screenVideo) return;
+    if (!canvas || !ctx) return;
     this.lastDrawAt = performance.now();
     const w = canvas.width;
     const h = canvas.height;
+    const mode = this.config.mode;
+    const scene = this.canvasScene.enabled ? this.canvasScene : null;
+    const screenVideo = this.screenVideo;
 
-    // 1. Backdrop: background wallpaper or plain black.
-    const painter =
-      this.effects.background === "none" ? undefined : BACKGROUND_PAINTERS[this.effects.background];
-    if (painter) {
-      painter(ctx, w, h);
+    // 1. Backdrop: the canvas scene (full page with text in camera mode,
+    //    wallpaper-only in screen modes — text would hide behind the screen)
+    //    or plain black.
+    if (scene && mode === "camera") {
+      paintCanvasScene(ctx, w, h, scene);
+    } else if (scene) {
+      paintCanvasScene(ctx, w, h, { ...scene, layout: "empty" });
     } else {
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, w, h);
     }
 
-    // 2. Screen content — full-bleed normally; inset with padding, rounded
-    //    corners and a drop shadow when a background wallpaper is active.
+    // 2. Content — screen modes: full-bleed normally, inset with padding,
+    //    rounded corners and a drop shadow over an active canvas backdrop.
     //    The content rect also anchors the bubble: its normalized position is
     //    relative to the SCREEN pixels (where the presenter dragged it), so
     //    when the screen is inset the bubble must follow it.
+    //    Camera mode without a canvas: the camera fills the frame instead.
     let contentX = 0;
     let contentY = 0;
     let contentW = w;
     let contentH = h;
-    if (painter) {
-      const pad = PADDING_FRACTIONS[this.effects.padding] * Math.min(w, h);
-      const sw = screenVideo.videoWidth || w;
-      const sh = screenVideo.videoHeight || h;
-      const fit = Math.min((w - pad * 2) / sw, (h - pad * 2) / sh);
-      contentW = Math.max(2, sw * fit);
-      contentH = Math.max(2, sh * fit);
-      contentX = (w - contentW) / 2;
-      contentY = (h - contentH) / 2;
-    }
-    if (screenVideo.readyState >= 2) {
-      if (painter) {
-        const radius =
-          this.effects.corners === "rounded" ? Math.max(8, Math.min(w, h) * 0.02) : 0;
-
-        ctx.save();
-        ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-        ctx.shadowBlur = Math.min(w, h) * 0.04;
-        ctx.shadowOffsetY = Math.min(w, h) * 0.012;
-        ctx.fillStyle = "#000000";
-        roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
-        ctx.fill();
-        ctx.restore();
-
-        ctx.save();
-        roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
-        ctx.clip();
-        ctx.drawImage(screenVideo, contentX, contentY, contentW, contentH);
-        ctx.restore();
-      } else {
-        ctx.drawImage(screenVideo, 0, 0, w, h);
+    if (mode !== "camera") {
+      if (!screenVideo) return;
+      if (scene) {
+        const pad = PADDING_FRACTIONS[this.effects.padding] * Math.min(w, h);
+        const sw = screenVideo.videoWidth || w;
+        const sh = screenVideo.videoHeight || h;
+        const fit = Math.min((w - pad * 2) / sw, (h - pad * 2) / sh);
+        contentW = Math.max(2, sw * fit);
+        contentH = Math.max(2, sh * fit);
+        contentX = (w - contentW) / 2;
+        contentY = (h - contentH) / 2;
       }
+      if (screenVideo.readyState >= 2) {
+        if (scene) {
+          const radius =
+            this.effects.corners === "rounded" ? Math.max(8, Math.min(w, h) * 0.02) : 0;
+
+          ctx.save();
+          ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+          ctx.shadowBlur = Math.min(w, h) * 0.04;
+          ctx.shadowOffsetY = Math.min(w, h) * 0.012;
+          ctx.fillStyle = "#000000";
+          roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
+          ctx.fill();
+          ctx.restore();
+
+          ctx.save();
+          roundRectPath(ctx, contentX, contentY, contentW, contentH, radius);
+          ctx.clip();
+          ctx.drawImage(screenVideo, contentX, contentY, contentW, contentH);
+          ctx.restore();
+        } else {
+          ctx.drawImage(screenVideo, 0, 0, w, h);
+        }
+      }
+    } else if (!scene) {
+      // Camera stage without a canvas — cover-fit the camera, no bubble ring.
+      const video = this.cameraVideo;
+      if (video && video.readyState >= 2) {
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+        const cover = Math.max(w / vw, h / vh);
+        const cw = vw * cover;
+        const ch = vh * cover;
+        ctx.drawImage(video, (w - cw) / 2, (h - ch) / 2, cw, ch);
+      }
+      return;
     }
 
-    // 3. Camera bubble.
+    // 3. Camera bubble (screen_camera always, and camera mode over a canvas).
+    if (mode === "screen") return;
     const cameraVideo = this.cameraVideo;
     if (!this.bubbleCompositing || !cameraVideo || cameraVideo.readyState < 2) return;
 
@@ -716,6 +778,8 @@ export class RecorderEngine {
       window.clearInterval(this.hiddenDrawTimer);
       this.hiddenDrawTimer = null;
     }
+    this.cameraProcessor?.destroy();
+    this.cameraProcessor = null;
     for (const stream of [
       this.canvasStream,
       this.outputStream,
@@ -803,9 +867,23 @@ export class RecorderEngine {
     this.bubbleSize = size;
   }
 
-  /** Live-updates effects; backgrounds only apply if a canvas was built. */
+  /**
+   * Live-updates effects — camera backgrounds switch instantly everywhere
+   * (bubble, PiP and recording all consume the processed stream).
+   */
   setEffects(effects: RecorderEffects): void {
     this.effects = effects;
+    this.cameraProcessor?.setBackground(effects.cameraBackground);
+  }
+
+  /**
+   * Live-updates the canvas backdrop (background, layout, text edits). The
+   * compositor reads it on the next frame, so stage edits stream straight
+   * into the recording. Screen-only recordings need the canvas enabled before
+   * start — without it the raw screen track is recorded compositor-free.
+   */
+  setCanvasScene(scene: CanvasScene): void {
+    this.canvasScene = scene;
   }
 
   /**

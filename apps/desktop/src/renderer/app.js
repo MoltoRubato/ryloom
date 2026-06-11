@@ -67,6 +67,7 @@ const state = {
     bubbleSize: 220,
     effects: {
       background: "none", // wallpaper behind the recording (composited)
+      cameraBackground: "none", // what's behind YOU on camera (segmentation)
       padding: "md", // canvas inset, used when a background is active
       corners: "rounded",
       frame: "circle", // camera bubble frame
@@ -106,6 +107,14 @@ const FRAME_PRESETS = [
   { id: "gradient", label: "Gradient" },
   { id: "square", label: "Square" },
   { id: "none", label: "Borderless" },
+];
+
+// Camera backgrounds (Effects → Backgrounds) — applied to the bubble via
+// person segmentation in bubble.html; ids must match its BG_PAINTERS.
+const CAMERA_BG_PRESETS = [
+  { id: "none", label: "Clear", css: null },
+  { id: "blur", label: "Blur", css: "linear-gradient(135deg,#3a4051,#191d27)" },
+  ...BG_PRESETS.filter((preset) => preset.id !== "none"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -649,6 +658,7 @@ function syncBubble() {
       deviceId: state.prefs.camDeviceId || $("cam-select").value || "",
       size: state.prefs.bubbleSize,
       frame: state.prefs.effects.frame || "circle",
+      cameraBg: state.prefs.effects.cameraBackground || "none",
     });
   } else {
     invoke("bubble-close");
@@ -1204,6 +1214,7 @@ function resetForNewRecording() {
 // ---------------------------------------------------------------------------
 
 function openEffects() {
+  renderCameraBgGrid();
   renderBgGrid();
   renderFrameGrid();
   renderSegRow("padding-row", "padding");
@@ -1212,7 +1223,35 @@ function openEffects() {
 }
 
 function updateEffectsDot() {
-  $("effects-dot").hidden = state.prefs.effects.background === "none";
+  $("effects-dot").hidden =
+    state.prefs.effects.background === "none" &&
+    (state.prefs.effects.cameraBackground || "none") === "none";
+}
+
+/** Effects → Backgrounds: your camera's background (Clear/Blur/replace). */
+function renderCameraBgGrid() {
+  const grid = $("cam-bg-grid");
+  grid.innerHTML = "";
+  for (const preset of CAMERA_BG_PRESETS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `swatch${preset.id === "none" ? " swatch-none" : ""}${
+      (state.prefs.effects.cameraBackground || "none") === preset.id ? " selected" : ""
+    }`;
+    if (preset.css) btn.style.background = preset.css;
+    const label = document.createElement("span");
+    label.className = "swatch-label";
+    label.textContent = preset.label;
+    btn.appendChild(label);
+    btn.addEventListener("click", () => {
+      state.prefs.effects.cameraBackground = preset.id;
+      savePrefs();
+      renderCameraBgGrid();
+      updateEffectsDot();
+      syncBubble(); // live-apply to the open camera bubble
+    });
+    grid.appendChild(btn);
+  }
 }
 
 function renderBgGrid() {

@@ -1,12 +1,17 @@
 /**
- * Recording effects — shared by the engine's canvas compositor and the
- * effects panel UI. Ported 1:1 from the desktop app (apps/desktop/src/
- * renderer/recorder.js BACKGROUND_PAINTERS + app.js BG_PRESETS/FRAME_PRESETS)
- * so a recording looks identical no matter which client made it.
+ * Recording effects — shared by the engine's canvas compositor, the camera
+ * background processor and the effects panel UI.
+ *
+ * "Backgrounds" here are CAMERA backgrounds (what's behind YOU in the video):
+ * Clear keeps your real room, Blur blurs it, and the gradient presets replace
+ * it entirely — all driven by person segmentation, exactly like Loom/Meet.
+ * The Canvas backdrop (recording wallpaper) lives in canvas-scene.ts.
  */
 
-export type BackgroundId =
+/** Virtual background applied to the camera video via person segmentation. */
+export type CameraBackgroundId =
   | "none"
+  | "blur"
   | "aurora"
   | "sunset"
   | "ocean"
@@ -23,20 +28,22 @@ export type CornersId = "rounded" | "square";
 export type BubbleFrame = "circle" | "gradient" | "square" | "none";
 
 export type RecorderEffects = {
-  background: BackgroundId;
+  /** Camera background — Clear / Blur / replacement (Effects → Backgrounds). */
+  cameraBackground: CameraBackgroundId;
+  /** Screen inset padding when a canvas backdrop is active (screen modes). */
   padding: PaddingId;
   corners: CornersId;
   frame: BubbleFrame;
 };
 
 export const DEFAULT_EFFECTS: RecorderEffects = {
-  background: "none",
+  cameraBackground: "none",
   padding: "md",
   corners: "rounded",
   frame: "circle",
 };
 
-/** Padding presets (Effects → Canvas) as a fraction of the short edge. */
+/** Padding presets (screen inset over the canvas backdrop). */
 export const PADDING_FRACTIONS: Record<PaddingId, number> = {
   none: 0,
   sm: 0.035,
@@ -44,9 +51,14 @@ export const PADDING_FRACTIONS: Record<PaddingId, number> = {
   lg: 0.095,
 };
 
-/** Swatch previews for the effects panel — ids must match the painters. */
-export const BG_PRESETS: Array<{ id: BackgroundId; label: string; css: string | null }> = [
-  { id: "none", label: "None", css: null },
+/** Swatches for Effects → Backgrounds — ids must match the painters. */
+export const CAMERA_BG_PRESETS: Array<{
+  id: CameraBackgroundId;
+  label: string;
+  css: string | null;
+}> = [
+  { id: "none", label: "Clear", css: null },
+  { id: "blur", label: "Blur", css: null },
   { id: "aurora", label: "Aurora", css: "linear-gradient(135deg,#16102e,#4636b3 60%,#2c8f6e)" },
   { id: "sunset", label: "Sunset", css: "linear-gradient(135deg,#ff7e5f,#feb47b)" },
   { id: "ocean", label: "Ocean", css: "linear-gradient(180deg,#0f2027,#203a43,#2c5364)" },
@@ -81,9 +93,13 @@ function paintGlow(
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
-type Painter = (ctx: CanvasRenderingContext2D, w: number, h: number) => void;
+export type Painter = (ctx: CanvasRenderingContext2D, w: number, h: number) => void;
 
-export const BACKGROUND_PAINTERS: Partial<Record<BackgroundId, Painter>> = {
+/**
+ * Replacement-background painters. "none" and "blur" have no painter — the
+ * camera processor passes the real background through (or blurs it).
+ */
+export const BACKGROUND_PAINTERS: Partial<Record<CameraBackgroundId, Painter>> = {
   aurora(ctx, w, h) {
     const base = ctx.createLinearGradient(0, 0, w, h);
     base.addColorStop(0, "#16102e");
