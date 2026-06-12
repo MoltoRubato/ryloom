@@ -57,7 +57,8 @@ const state = {
   workspaces: [], // [{ workspace, role }]
   workspaceId: null,
   sources: [],
-  source: null, // selected capture source
+  source: null, // selected capture source (or a { kind: "region" } pseudo-source)
+  plan: null, // resolved capture plan for the in-flight recording
   prefs: {
     micOn: true,
     camOn: false,
@@ -522,6 +523,17 @@ async function refreshSources() {
   }
   // Screens first.
   state.sources.sort((a, b) => Number(b.isScreen) - Number(a.isScreen));
+  // A custom area isn't in the sources list — keep it while its display lives.
+  if (state.source && state.source.kind === "region") {
+    const displayAlive = state.sources.some(
+      (s) => s.isScreen && String(s.displayId) === String(state.source.displayId),
+    );
+    if (displayAlive) {
+      renderSelectedSource();
+      return;
+    }
+    state.source = null;
+  }
   const selectedStillExists =
     state.source && state.sources.some((s) => s.id === state.source.id);
   if (!selectedStillExists) {
@@ -534,7 +546,18 @@ async function refreshSources() {
 
 function renderSelectedSource() {
   const thumb = $("source-thumb");
-  if (state.source) {
+  if (state.source && state.source.kind === "region") {
+    const { width, height } = state.source.rect;
+    $("source-name").textContent = `Custom area — ${width} × ${height}`;
+    $("source-kind").textContent = "Region of screen";
+    if (state.source.thumbnailDataUrl) {
+      thumb.src = state.source.thumbnailDataUrl;
+      thumb.style.display = "";
+    } else {
+      thumb.removeAttribute("src");
+      thumb.style.display = "none";
+    }
+  } else if (state.source) {
     $("source-name").textContent = state.source.isScreen
       ? screenLabel(state.source)
       : state.source.name;
@@ -619,6 +642,194 @@ function renderSourceGrids() {
 
   for (const source of screens) screensGrid.appendChild(makeTile(source));
   for (const source of windows) windowsGrid.appendChild(makeTile(source));
+}
+
+// --- custom-size region ------------------------------------------------------
+
+/** Clips `rect` to `bounds`; returns null when they don't overlap. */
+function intersectRects(rect, bounds) {
+  const x1 = Math.max(rect.x, bounds.x);
+  const y1 = Math.max(rect.y, bounds.y);
+  const x2 = Math.min(rect.x + rect.width, bounds.x + bounds.width);
+  const y2 = Math.min(rect.y + rect.height, bounds.y + bounds.height);
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+/** Screen source for a display id, refreshing the list once if needed. */
+async function findScreenSource(displayId) {
+  const find = () =>
+    state.sources.find(
+      (s) => s.isScreen && String(s.displayId) === String(displayId),
+    ) || null;
+  let found = find();
+  if (!found) {
+    await invoke("get-sources").then((sources) => {
+      state.sources = sources;
+      state.sources.sort((a, b) => Number(b.isScreen) - Number(a.isScreen));
+    }).catch(() => {});
+    found = find();
+  }
+  return found;
+}
+
+/** Screen source whose display overlaps `rect` (global DIPs) the most. */
+function findScreenSourceForRect(rect) {
+  let best = null;
+  let bestArea = 0;
+  for (const source of state.sources) {
+    if (!source.isScreen || !source.displayBounds) continue;
+    const overlap = intersectRects(rect, source.displayBounds);
+    const area = overlap ? overlap.width * overlap.height : 0;
+    if (area > bestArea) {
+      bestArea = area;
+      best = source;
+    }
+  }
+  return best;
+}
+
+/** Crops the screen's picker thumbnail down to the region, for the source card. */
+function buildRegionThumbnail(rect, screenSource) {
+  return new Promise((resolve) => {
+    if (!screenSource || !screenSource.thumbnailDataUrl || !screenSource.displayBounds) {
+      resolve(null);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const db = screenSource.displayBounds;
+        const scaleX = img.naturalWidth / db.width;
+        const scaleY = img.naturalHeight / db.height;
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(2, Math.round(rect.width * scaleX));
+        canvas.height = Math.max(2, Math.round(rect.height * scaleY));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(
+          img,
+          (rect.x - db.x) * scaleX,
+          (rect.y - db.y) * scaleY,
+          rect.width * scaleX,
+          rect.height * scaleY,
+          0,
+          0,
+          canvas.width,
+          canvas.height,
+        );
+        resolve(canvas.toDataURL("image/png"));
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = screenSource.thumbnailDataUrl;
+  });
+}
+
+/** "Custom size" — full-screen overlay where the user drags out a rectangle. */
+async function selectCustomRegion() {
+  $("sources-overlay").hidden = true;
+  // Hide the hub so the user can frame their actual content, not this panel.
+  await invoke("main-hide");
+  let result = null;
+  try {
+    result = await invoke("region-select");
+    if (result && result.rect) {
+      // Refresh while still hidden — thumbnails come back without the hub.
+      await refreshSources();
+      const screenSource = await findScreenSource(result.displayId);
+      state.source = {
+        kind: "region",
+        id: `region:${result.displayId}`,
+        displayId: result.displayId,
+        rect: result.rect,
+        name: "Custom area",
+        thumbnailDataUrl: await buildRegionThumbnail(result.rect, screenSource),
+      };
+      renderSelectedSource();
+    }
+  } finally {
+    await invoke("main-show");
+  }
+}
+
+// --- capture plan -------------------------------------------------------------
+
+/**
+ * Decides what actually gets captured for the selected source.
+ *
+ * Loom-style capture: "specific window" and "custom size" both record the
+ * ENTIRE screen and crop to a rectangle (recorder.js does the cropping).
+ * Capturing a window's own pixel buffer would exclude the floating camera
+ * bubble — it's a separate always-on-top window, so it only exists in
+ * screen captures.
+ *
+ * Returns { sourceId, captureSize, displayId, crop, label } where crop is
+ * { rect, displayBounds } in global DIPs or null for plain screen capture.
+ * Windows fall back to direct window capture (no bubble) when their bounds
+ * can't be resolved — non-macOS platforms or a window that just closed.
+ * Throws with a user-facing message when recording can't proceed at all.
+ */
+async function resolveCapturePlan() {
+  const source = state.source;
+  if (!source) return null;
+
+  if (source.kind === "region") {
+    const screenSource = await findScreenSource(source.displayId);
+    if (!screenSource || !screenSource.displayBounds) {
+      throw new Error(
+        "The display your custom area was on is gone — pick a new area.",
+      );
+    }
+    const rect = intersectRects(source.rect, screenSource.displayBounds);
+    if (!rect || rect.width < 16 || rect.height < 16) {
+      throw new Error("Your custom area is no longer on screen — pick a new area.");
+    }
+    return {
+      sourceId: screenSource.id,
+      captureSize: screenSource.captureSize || null,
+      displayId: screenSource.displayId,
+      crop: { rect, displayBounds: screenSource.displayBounds },
+      label: `Recording custom area (${rect.width} × ${rect.height})`,
+    };
+  }
+
+  if (!source.isScreen) {
+    const windowRect = await invoke("get-window-bounds", source.id);
+    if (windowRect) {
+      const screenSource = findScreenSourceForRect(windowRect);
+      if (screenSource && screenSource.displayBounds) {
+        const rect = intersectRects(windowRect, screenSource.displayBounds);
+        if (rect && rect.width >= 16 && rect.height >= 16) {
+          return {
+            sourceId: screenSource.id,
+            captureSize: screenSource.captureSize || null,
+            displayId: screenSource.displayId,
+            crop: { rect, displayBounds: screenSource.displayBounds },
+            label: `Recording “${source.name}”`,
+          };
+        }
+      }
+    }
+    // Bounds unavailable — capture the window surface directly. Works
+    // everywhere, but the camera bubble can't appear in the result.
+    return {
+      sourceId: source.id,
+      captureSize: source.captureSize || null,
+      displayId: source.displayId || null,
+      crop: null,
+      label: `Recording “${source.name}”`,
+    };
+  }
+
+  return {
+    sourceId: source.id,
+    captureSize: source.captureSize || null,
+    displayId: source.displayId || null,
+    crop: null,
+    label: `Recording ${screenLabel(source).toLowerCase()}`,
+  };
 }
 
 // --- devices ----------------------------------------------------------------
@@ -767,6 +978,24 @@ async function startRecordingFlow() {
     state.blob = null;
     state.uploadDone = false;
 
+    // Work out what actually gets captured — windows and custom areas become
+    // "whole screen + crop rect" (Loom-style) so the camera bubble stays in
+    // the video; entire screens record as-is.
+    let plan;
+    try {
+      plan = await resolveCapturePlan();
+    } catch (err) {
+      await safeCancelSession();
+      setBanner("home-error", errorMessage(err, "Couldn't resolve the capture area."));
+      return;
+    }
+    if (!plan) {
+      await safeCancelSession();
+      showPermissionCard("screen");
+      return;
+    }
+    state.plan = plan;
+
     // Hide the hub BEFORE the countdown/capture starts so the panel never
     // appears in the recording — the floating control bar (content-protected,
     // never captured) takes over from here.
@@ -776,7 +1005,7 @@ async function startRecordingFlow() {
     // display, like Loom's. Never appears in the captured video.
     if (state.prefs.countdownOn) {
       const completed = await invoke("countdown-run", {
-        displayId: state.source.displayId || null,
+        displayId: plan.displayId || null,
       });
       if (!completed) {
         await safeCancelSession();
@@ -784,9 +1013,18 @@ async function startRecordingFlow() {
         await invoke("main-show");
         return;
       }
+      // A window can move during the 3-2-1 — re-resolve so the crop rect is
+      // fresh at the moment capture starts. Keep the prior plan on failure.
+      if (state.source && !state.source.isScreen && state.source.kind !== "region") {
+        try {
+          state.plan = await resolveCapturePlan();
+        } catch {
+          /* window vanished mid-countdown — beginCapture surfaces the error */
+        }
+      }
     }
 
-    const started = await beginCapture();
+    const started = await beginCapture(state.plan);
     if (!started) return;
   } finally {
     state.starting = false;
@@ -794,16 +1032,24 @@ async function startRecordingFlow() {
   }
 }
 
-/** Starts the Recorder + control bar. Assumes state.active is set. */
-async function beginCapture() {
+/** Starts the Recorder + control bar. Assumes state.active and plan are set. */
+async function beginCapture(plan) {
+  // Cropped captures only show what's inside the rect — pull the bubble in
+  // first so the camera is in frame from the very first recorded frame.
+  if (plan.crop && state.prefs.camOn) {
+    await invoke("bubble-move-into", plan.crop.rect);
+  }
+
   state.recorder = new Recorder();
   try {
     await state.recorder.start({
-      sourceId: state.source.id,
+      sourceId: plan.sourceId,
       // Physical pixel size for screens (from get-sources) — lets the
       // recorder pin capture at native resolution instead of Chromium's
       // 2880x1800 downscale.
-      captureSize: state.source.captureSize || null,
+      captureSize: plan.captureSize,
+      // Loom-style window/region capture: whole screen in, crop rect out.
+      crop: plan.crop,
       micEnabled: Boolean(state.prefs.micOn),
       micDeviceId: state.prefs.micDeviceId || $("mic-select").value || null,
       effects: {
@@ -831,16 +1077,14 @@ async function beginCapture() {
   }
 
   await invoke("set-recording", true);
-  $("rec-source-label").textContent = state.source.isScreen
-    ? `Recording ${screenLabel(state.source).toLowerCase()}`
-    : `Recording “${state.source.name}”`;
+  $("rec-source-label").textContent = plan.label;
   $("btn-pause").textContent = "Pause";
   $("rec-dot").classList.remove("paused");
   $("rec-state-label").textContent = "Recording";
   $("rec-timer").textContent = "00:00";
   setView("recording"); // shown only if the user re-opens the hidden hub
 
-  await invoke("controls-open", { displayId: state.source.displayId || null });
+  await invoke("controls-open", { displayId: plan.displayId || null });
   startStatusTimer();
   return true;
 }
@@ -962,7 +1206,7 @@ async function restartRecordingFlow() {
 
     if (state.prefs.countdownOn) {
       const completed = await invoke("countdown-run", {
-        displayId: state.source.displayId || null,
+        displayId: (state.plan && state.plan.displayId) || null,
       });
       if (!completed) {
         // Canceling the restart countdown discards the take entirely.
@@ -976,7 +1220,14 @@ async function restartRecordingFlow() {
       }
     }
 
-    await beginCapture();
+    // The window may have moved between takes — refresh the crop rect, but
+    // keep the previous plan if resolution fails mid-restart.
+    try {
+      state.plan = await resolveCapturePlan();
+    } catch {
+      /* keep the previous plan */
+    }
+    await beginCapture(state.plan);
   } finally {
     state.restarting = false;
   }
@@ -1215,6 +1466,7 @@ function saveLocalCopy() {
 function resetForNewRecording() {
   state.blob = null;
   state.active = null;
+  state.plan = null;
   state.upload = null;
   state.uploadDone = false;
   state.durationMs = 0;
@@ -1397,6 +1649,11 @@ function wireEvents() {
     await storeSet("lastWorkspaceId", state.workspaceId);
   });
   $("source-btn").addEventListener("click", openSourcePicker);
+  $("btn-custom-size").addEventListener("click", () => {
+    selectCustomRegion().catch((err) => {
+      toast(`Couldn't select an area: ${errorMessage(err, "unknown error")}`, "error");
+    });
+  });
   $("btn-record").addEventListener("click", startRecordingFlow);
   $("btn-effects").addEventListener("click", openEffects);
   $("btn-notes").addEventListener("click", () => invoke("notes-toggle"));
