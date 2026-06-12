@@ -21,6 +21,9 @@ import {
   closeDesktopBubble,
   isDesktopAppDetected,
   openDesktopBubble,
+  openDesktopRecorder,
+  prefersWebRecorder,
+  setPrefersWebRecorder,
 } from "@/lib/recorder/desktop-bubble";
 import { DEFAULT_EFFECTS } from "@/lib/recorder/effects";
 import {
@@ -180,6 +183,10 @@ export function RecorderApp() {
   // The bubble was handed to the desktop app's floating window — a true
   // transparent always-on-top circle the OS composites into monitor captures.
   const [desktopBubbleActive, setDesktopBubbleActive] = useState(false);
+  // Desktop-app record priority (Loom-style): both read from localStorage
+  // after mount to keep SSR markup deterministic.
+  const [desktopAppDetected, setDesktopAppDetected] = useState(false);
+  const [preferDesktopApp, setPreferDesktopApp] = useState(true);
   const [notesOpen, setNotesOpen] = useState(false);
   const [effectsOpen, setEffectsOpen] = useState(false);
   const [permissionIssue, setPermissionIssue] = useState<RecorderAcquireError | null>(null);
@@ -202,6 +209,19 @@ export function RecorderApp() {
   const extraRecoveryKeyRef = useRef<string | null>(null);
   const pendingRetryRef = useRef<{ session: ActiveSession; workspaceId: string } | null>(null);
   const stopRecordingRef = useRef<() => Promise<void>>(async () => undefined);
+  const startRecordingRef = useRef<(options?: { skipApp?: boolean }) => Promise<void>>(
+    async () => undefined,
+  );
+
+  useEffect(() => {
+    setDesktopAppDetected(isDesktopAppDetected());
+    setPreferDesktopApp(!prefersWebRecorder());
+  }, []);
+
+  const handlePreferDesktopApp = useCallback((preferred: boolean) => {
+    setPreferDesktopApp(preferred);
+    setPrefersWebRecorder(!preferred);
+  }, []);
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -632,7 +652,8 @@ export function RecorderApp() {
     [settings, discardActive, handOffBubbleToDesktop],
   );
 
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(
+    async ({ skipApp = false }: { skipApp?: boolean } = {}) => {
     if (phaseRef.current !== "setup") return;
     if (!workspaceId) {
       toast.error("You need a workspace before you can record.");
@@ -643,6 +664,32 @@ export function RecorderApp() {
       return;
     }
     setPhase("starting");
+
+    // Loom-style priority: the desktop app records better than any browser
+    // can (true always-on-top bubble, content-protected controls), so hand
+    // the WHOLE recording to it when it's around. Skipped when the user
+    // prefers the browser, asked for it one-shot via the toast below, or
+    // arrived from the extension with a tab to record. With unknown install
+    // state this is attempted once per session — not installed means the
+    // deep link silently does nothing and the web flow continues.
+    if (!skipApp && !sourceUrl && !prefersWebRecorder()) {
+      if (await openDesktopRecorder()) {
+        setDesktopAppDetected(true);
+        setPhase("setup");
+        toast.success("Recording in the Ryloom desktop app", {
+          description: "The app takes it from here — check your menu bar.",
+          duration: 10_000,
+          action: {
+            label: "Record in browser",
+            onClick: () => void startRecordingRef.current({ skipApp: true }),
+          },
+        });
+        return;
+      }
+      // The ref mutates during the await (hence the cast past TS narrowing):
+      // bail if the user left the starting phase mid-attempt.
+      if ((phaseRef.current as Phase) !== "starting") return;
+    }
 
     const mimeType = pickSupportedMimeType();
 
@@ -676,14 +723,13 @@ export function RecorderApp() {
     sessionRef.current = active;
     setTitle(initialTitle ?? defaultRecordingTitle());
     await beginCapture(active, workspaceId);
-  }, [
-    workspaceId,
-    settings.mode,
-    sourceUrl,
-    initialTitle,
-    createSessionAsync,
-    beginCapture,
-  ]);
+    },
+    [workspaceId, settings.mode, sourceUrl, initialTitle, createSessionAsync, beginCapture],
+  );
+
+  useEffect(() => {
+    startRecordingRef.current = startRecording;
+  }, [startRecording]);
 
   const retryCapture = useCallback(() => {
     const pending = pendingRetryRef.current;
@@ -1069,6 +1115,9 @@ export function RecorderApp() {
               workspaceId={workspaceId}
               starting={phase === "starting"}
               notesOpen={notesOpen}
+              desktopAppDetected={desktopAppDetected}
+              preferDesktopApp={preferDesktopApp}
+              onPreferDesktopAppChange={handlePreferDesktopApp}
               onOpenEffects={() => setEffectsOpen(true)}
               onToggleNotes={() => setNotesOpen((open) => !open)}
               onStart={() => void startRecording()}

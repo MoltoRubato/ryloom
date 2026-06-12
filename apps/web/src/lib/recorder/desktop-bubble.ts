@@ -24,6 +24,7 @@ import { type BubbleSize } from "./engine";
 
 const DETECTED_KEY = "ryloom:desktop-app";
 const SESSION_MISS_KEY = "ryloom:desktop-app-miss";
+const PREFER_WEB_KEY = "ryloom:prefer-web-recorder";
 
 /** How long the app gets to steal focus before we declare "not installed". */
 const LAUNCH_TIMEOUT_MS = 1600;
@@ -59,6 +60,40 @@ function launchMissedThisSession(): boolean {
   } catch {
     return false;
   }
+}
+
+/** The user flipped "Record with the desktop app" off — browser recorder wins. */
+export function prefersWebRecorder(): boolean {
+  try {
+    return localStorage.getItem(PREFER_WEB_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setPrefersWebRecorder(preferWeb: boolean): void {
+  try {
+    if (preferWeb) localStorage.setItem(PREFER_WEB_KEY, "1");
+    else localStorage.removeItem(PREFER_WEB_KEY);
+  } catch {
+    // storage unavailable — the preference just won't persist
+  }
+}
+
+/**
+ * Loom-style record priority: hand the WHOLE recording to the installed
+ * desktop app (`ryloom://record` → the app's native record flow). Resolves
+ * true when something picked the deep link up; the caller then leaves the
+ * web recorder idle. Attempted at most once per session when the install
+ * state is unknown, so users without the app only ever pay the timeout once.
+ */
+export async function openDesktopRecorder(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  if (!isDesktopAppDetected() && launchMissedThisSession()) return false;
+  const launched = await focusLostAfter(() => fireDeepLink("ryloom://record"));
+  if (launched) markDesktopAppDetected();
+  else markLaunchMissed();
+  return launched;
 }
 
 export type DesktopBubbleParams = {
