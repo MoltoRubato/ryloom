@@ -17,6 +17,11 @@ import {
   type CanvasScene,
   type CanvasTemplate,
 } from "@/lib/recorder/canvas-scene";
+import {
+  closeDesktopBubble,
+  isDesktopAppDetected,
+  openDesktopBubble,
+} from "@/lib/recorder/desktop-bubble";
 import { DEFAULT_EFFECTS } from "@/lib/recorder/effects";
 import {
   cornerToPosition,
@@ -172,6 +177,9 @@ export function RecorderApp() {
   const [bubbleHidden, setBubbleHidden] = useState(false);
   // The bubble lives in an always-on-top PiP window (visible across tabs).
   const [pipActive, setPipActive] = useState(false);
+  // The bubble was handed to the desktop app's floating window — a true
+  // transparent always-on-top circle the OS composites into monitor captures.
+  const [desktopBubbleActive, setDesktopBubbleActive] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [effectsOpen, setEffectsOpen] = useState(false);
   const [permissionIssue, setPermissionIssue] = useState<RecorderAcquireError | null>(null);
@@ -184,6 +192,7 @@ export function RecorderApp() {
   const sessionRef = useRef<ActiveSession | null>(null);
   const titleRef = useRef(title);
   const pipRef = useRef<PipBubbleHandle | null>(null);
+  const desktopBubbleActiveRef = useRef(false);
   const bubbleBurnedRef = useRef(false);
   const bubbleHiddenRef = useRef(false);
   const settingsRef = useRef(settings);
@@ -223,6 +232,23 @@ export function RecorderApp() {
     pipRef.current = null;
     setPipActive(false);
   }, []);
+
+  /** Dismisses the desktop app's floating bubble (if we handed it the camera). */
+  const teardownDesktopBubble = useCallback(() => {
+    if (!desktopBubbleActiveRef.current) return;
+    desktopBubbleActiveRef.current = false;
+    setDesktopBubbleActive(false);
+    closeDesktopBubble();
+  }, []);
+
+  /** Undo for the desktop handoff — back to the in-page bubble + compositing. */
+  const returnBubbleToPage = useCallback(() => {
+    if (!desktopBubbleActiveRef.current) return;
+    teardownDesktopBubble();
+    engineRef.current?.setBubbleCompositing(
+      !bubbleBurnedRef.current && !bubbleHiddenRef.current,
+    );
+  }, [teardownDesktopBubble]);
 
   // --- Bubble + effects (live-wired into the engine) ----------------------------
 
@@ -266,7 +292,13 @@ export function RecorderApp() {
    */
   const openPip = useCallback(async () => {
     const engine = engineRef.current;
-    if (!engine || pipRef.current?.isOpen || bubbleHiddenRef.current) return;
+    if (
+      !engine ||
+      pipRef.current?.isOpen ||
+      bubbleHiddenRef.current ||
+      desktopBubbleActiveRef.current
+    )
+      return;
     const current = settingsRef.current;
     if (current.mode !== "screen_camera") return;
     const handle = await openPipBubble({
@@ -281,7 +313,9 @@ export function RecorderApp() {
         setPipActive(false);
         // Back to the in-page bubble — restore the probed compositing rule.
         engineRef.current?.setBubbleCompositing(
-          !bubbleBurnedRef.current && !bubbleHiddenRef.current,
+          !bubbleBurnedRef.current &&
+            !bubbleHiddenRef.current &&
+            !desktopBubbleActiveRef.current,
         );
       },
     });
@@ -295,6 +329,47 @@ export function RecorderApp() {
       engine.screenDisplaySurface !== "monitor" && !bubbleHiddenRef.current,
     );
   }, [handleBubbleMove, handleBubbleResize, hideBubble]);
+
+  /**
+   * Hands the self-view to the desktop app's floating bubble via a
+   * ryloom://bubble deep link — a REAL transparent always-on-top circle (no
+   * PiP window chrome), which the web platform cannot produce on its own.
+   * Only for monitor captures: there the OS physically composites the
+   * floating window into the recording, exactly like a native desktop
+   * recording; in tab/window captures it would float uncaptured and mislead
+   * the presenter.
+   */
+  const handOffBubbleToDesktop = useCallback(async (): Promise<boolean> => {
+    const engine = engineRef.current;
+    if (!engine || desktopBubbleActiveRef.current || bubbleHiddenRef.current) return false;
+    const current = settingsRef.current;
+    if (current.mode !== "screen_camera") return false;
+    if (engine.screenDisplaySurface !== "monitor") return false;
+    const launched = await openDesktopBubble({
+      cameraLabel: engine.cameraTrackLabel,
+      size: current.bubbleSize,
+      frame: current.effects.frame,
+      cameraBackground: current.effects.cameraBackground,
+    });
+    if (!launched || !engineRef.current) return false;
+    desktopBubbleActiveRef.current = true;
+    setDesktopBubbleActive(true);
+    closePip();
+    // The floating bubble is burned in by the OS compositor — compositing a
+    // second one onto the canvas would double it.
+    engineRef.current.setBubbleCompositing(false);
+    toast.success("Camera bubble is now floating via the Ryloom desktop app", {
+      description: "It stays on top of everything and is part of the recording.",
+      action: { label: "Bring back here", onClick: returnBubbleToPage },
+    });
+    return true;
+  }, [closePip, returnBubbleToPage]);
+
+  /** Pop-out: prefer the desktop app's true circle; fall back to Document PiP. */
+  const popOutBubble = useCallback(async () => {
+    if (await handOffBubbleToDesktop()) return;
+    await openPip();
+  }, [handOffBubbleToDesktop, openPip]);
 
   const handleEffectsChange = useCallback(
     (patch: Partial<RecorderSettings["effects"]>) => {
@@ -356,6 +431,7 @@ export function RecorderApp() {
       engineRef.current = null;
       engine?.destroy();
       closePip();
+      teardownDesktopBubble();
       setCameraPreview(null);
       setBubbleHidden(false);
       setBubbleBurned(false);
@@ -377,7 +453,7 @@ export function RecorderApp() {
       setPhase("setup");
       if (!silent) toast.info("Recording discarded.");
     },
-    [cancelSessionAsync, closePip],
+    [cancelSessionAsync, closePip, teardownDesktopBubble],
   );
 
   // Release camera/mic/screen if the user navigates away mid-flow.
@@ -399,6 +475,7 @@ export function RecorderApp() {
     stoppingRef.current = true;
     setPhase("stopping");
     closePip();
+    teardownDesktopBubble();
     try {
       const blob = await engine.stop();
       const elapsed = Math.round(engine.getElapsedMs());
@@ -431,7 +508,7 @@ export function RecorderApp() {
     } finally {
       stoppingRef.current = false;
     }
-  }, [cancelSessionAsync, closePip]);
+  }, [cancelSessionAsync, closePip, teardownDesktopBubble]);
 
   useEffect(() => {
     stopRecordingRef.current = stopRecording;
@@ -523,12 +600,15 @@ export function RecorderApp() {
       bubbleBurnedRef.current = burned;
       console.debug("[recorder] bubble mode:", burned ? "burned-in page bubble" : "composited");
 
-      // Always-on-top self-view: pop the bubble out immediately when the
-      // share flow was quick enough to keep the click's activation alive.
-      // Otherwise Chrome's auto-PiP (registered below) opens it on tab
-      // switch, and the bubble's pop-out button always works.
-      if (settings.mode === "screen_camera" && isDocumentPipSupported()) {
-        void openPip();
+      // Always-on-top self-view. The in-page bubble IS the true circle, so
+      // it stays the default — no more popping a rectangular PiP window in
+      // the presenter's face at start. When this is a monitor capture and
+      // the desktop app is installed, hand the bubble to its floating
+      // always-on-top circle instead (the OS burns it into the capture).
+      // Document PiP remains the fallback: Chrome's auto-PiP (registered
+      // below) opens it on tab switch, and the pop-out button always works.
+      if (settings.mode === "screen_camera" && isDesktopAppDetected()) {
+        void handOffBubbleToDesktop();
       }
 
       setHasMic(settings.micEnabled);
@@ -549,7 +629,7 @@ export function RecorderApp() {
         }
       }
     },
-    [settings, discardActive, openPip],
+    [settings, discardActive, handOffBubbleToDesktop],
   );
 
   const startRecording = useCallback(async () => {
@@ -722,9 +802,10 @@ export function RecorderApp() {
   useEffect(() => {
     if (phase !== "recording" && phase !== "countdown") return;
     if (settings.mode !== "screen_camera") return;
+    if (desktopBubbleActive) return; // the app's floating circle covers this
     if (!isDocumentPipSupported()) return;
     return registerAutoPip(() => void openPip());
-  }, [phase, settings.mode, openPip]);
+  }, [phase, settings.mode, desktopBubbleActive, openPip]);
 
   // Warn before closing the tab while capture is in flight (the preview panel
   // covers the upload phase itself).
@@ -1080,7 +1161,8 @@ export function RecorderApp() {
         (settings.mode === "screen_camera" ||
           (settings.mode === "camera" && settings.canvas.enabled)) &&
         !bubbleHidden &&
-        !pipActive && (
+        !pipActive &&
+        !desktopBubbleActive && (
           <CameraBubble
             stream={cameraPreview}
             position={bubblePos}
@@ -1090,8 +1172,9 @@ export function RecorderApp() {
             onSizeChange={handleBubbleResize}
             onHide={hideBubble}
             onPopOut={
-              settings.mode === "screen_camera" && isDocumentPipSupported()
-                ? () => void openPip()
+              settings.mode === "screen_camera" &&
+              (isDocumentPipSupported() || isDesktopAppDetected())
+                ? () => void popOutBubble()
                 : undefined
             }
           />

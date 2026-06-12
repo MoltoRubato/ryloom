@@ -240,6 +240,14 @@ export class RecorderEngine {
     return this.cameraProcessor?.stream ?? this.cameraStream;
   }
 
+  /**
+   * OS label of the active camera — lets the desktop app's bubble open the
+   * same device (deviceIds are origin-scoped and don't cross app boundaries).
+   */
+  get cameraTrackLabel(): string | null {
+    return this.cameraStream?.getVideoTracks()[0]?.label || null;
+  }
+
   /** Raw screen stream — used by the self-view capture probe before start(). */
   get screenCaptureStream(): MediaStream | null {
     return this.screenStream;

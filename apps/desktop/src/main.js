@@ -40,7 +40,15 @@ let tray = null;
 let isRecording = false;
 /** Deep-link auth tokens that arrived before the renderer was ready. */
 let pendingAuthTokens = null;
+/** A ryloom://record deep link arrived before the renderer was ready. */
+let pendingTrayRecord = false;
 let rendererReady = false;
+/**
+ * The app was launched solely to host the floating camera bubble (the web
+ * recorder fired ryloom://bubble while capturing a monitor). The hub window
+ * must stay closed — it would appear in the user's recording.
+ */
+let bubbleOnlyLaunch = false;
 
 // Dev/QA escape hatch: content-protected windows are invisible to screenshots
 // too, which makes UI work on them impossible. Setting this env var keeps
@@ -122,27 +130,70 @@ function registerProtocol() {
   }
 }
 
-/** Parses ryloom://auth#access_token=…&refresh_token=… and forwards tokens. */
+/**
+ * ryloom:// deep links — the browser → app bridge.
+ *
+ *   ryloom://auth#access_token=…&refresh_token=…  sign the app in
+ *   ryloom://record                               open the hub, start recording
+ *   ryloom://bubble?label=…&size=…&frame=…&cameraBg=…
+ *     Float ONLY the always-on-top camera bubble — no hub window. The web
+ *     recorder hands its self-view here while capturing a monitor, so the
+ *     true transparent circle (impossible in a browser, where Document PiP
+ *     is always a rectangular window) gets composited into the capture by
+ *     the OS, exactly like a native desktop recording.
+ *   ryloom://bubble-close                         dismiss that bubble again
+ */
 function handleDeepLink(rawUrl) {
   if (typeof rawUrl !== "string" || !rawUrl.startsWith("ryloom://")) return;
+  let url;
+  let action;
   try {
-    const url = new URL(rawUrl);
-    const action = url.hostname || url.pathname.replace(/^\/+/, "");
-    if (action === "auth") {
-      // Tokens travel in the fragment so they never hit any server logs.
-      const fragment = (url.hash || "").replace(/^#/, "");
-      const params = new URLSearchParams(
-        fragment.length > 0 ? fragment : url.search.replace(/^\?/, ""),
-      );
-      const accessToken = params.get("access_token");
-      const refreshToken = params.get("refresh_token");
-      if (accessToken && refreshToken) {
-        deliverAuthTokens({ accessToken, refreshToken });
-      }
-    }
+    url = new URL(rawUrl);
+    action = (url.hostname || url.pathname.replace(/^\/+/, "")).toLowerCase();
   } catch (err) {
     console.error("[ryloom] failed to parse deep link:", err);
+    return;
   }
+
+  if (action === "bubble" || action === "bubble-close") {
+    // While a NATIVE recording runs, the bubble belongs to it — a stray web
+    // deep link must not replace or kill it.
+    if (isRecording) return;
+    if (action === "bubble-close") {
+      closeBubble();
+      return;
+    }
+    // Bubble-only companion mode: never raise the hub — the presenter is
+    // mid-recording in the browser and the hub would be captured. The
+    // browser's external-protocol consent prompt gates who can trigger this;
+    // the bubble itself only shows the camera locally (nothing is
+    // transmitted).
+    const q = url.searchParams;
+    openBubble(
+      q.get("deviceId") || "",
+      q.get("size") || 220,
+      q.get("frame") || "circle",
+      q.get("cameraBg") || "none",
+      q.get("label") || "",
+    );
+    return;
+  }
+
+  if (action === "auth") {
+    // Tokens travel in the fragment so they never hit any server logs.
+    const fragment = (url.hash || "").replace(/^#/, "");
+    const params = new URLSearchParams(
+      fragment.length > 0 ? fragment : url.search.replace(/^\?/, ""),
+    );
+    const accessToken = params.get("access_token");
+    const refreshToken = params.get("refresh_token");
+    if (accessToken && refreshToken) {
+      deliverAuthTokens({ accessToken, refreshToken });
+    }
+  } else if (action === "record") {
+    deliverTrayRecord();
+  }
+
   showMainWindow();
 }
 
@@ -151,6 +202,16 @@ function deliverAuthTokens(tokens) {
     mainWindow.webContents.send("auth-tokens", tokens);
   } else {
     pendingAuthTokens = tokens;
+  }
+}
+
+/** ryloom://record → same flow as the tray's "Start recording". */
+function deliverTrayRecord() {
+  if (isRecording) return;
+  if (mainWindow && !mainWindow.isDestroyed() && rendererReady) {
+    mainWindow.webContents.send("tray-record");
+  } else {
+    pendingTrayRecord = true;
   }
 }
 
@@ -209,6 +270,10 @@ function createMainWindow() {
       mainWindow.webContents.send("auth-tokens", pendingAuthTokens);
       pendingAuthTokens = null;
     }
+    if (pendingTrayRecord) {
+      pendingTrayRecord = false;
+      mainWindow.webContents.send("tray-record");
+    }
   });
 
   mainWindow.on("close", (event) => {
@@ -251,7 +316,7 @@ function showMainWindow() {
   win.focus();
 }
 
-function openBubble(deviceId, size, frame, cameraBg) {
+function openBubble(deviceId, size, frame, cameraBg, label) {
   closeBubble();
   const bubbleSize = clampBubbleSize(size);
   const { workArea } = screen.getPrimaryDisplay();
@@ -286,6 +351,9 @@ function openBubble(deviceId, size, frame, cameraBg) {
       deviceId: deviceId || "",
       frame: frame || "circle",
       cameraBg: cameraBg || "none",
+      // Browser deviceIds are origin-scoped and useless here — web handoffs
+      // send the OS device label instead, matched in bubble.html.
+      label: label || "",
     },
   });
   bubbleWindow.on("closed", () => {
@@ -781,6 +849,11 @@ function bootstrap() {
     if (app.isReady()) {
       handleDeepLink(url);
     } else {
+      // Cold-started just to float the bubble (covers bubble-close too) —
+      // flag it before whenReady so the hub window is never created.
+      if (typeof url === "string" && url.startsWith("ryloom://bubble")) {
+        bubbleOnlyLaunch = true;
+      }
       app.whenReady().then(() => handleDeepLink(url));
     }
   });
@@ -795,10 +868,13 @@ function bootstrap() {
   app.whenReady().then(() => {
     registerIpc();
     createTray();
-    createMainWindow();
 
-    // Cold-start deep link (Windows/Linux).
+    // Cold-start deep link (Windows/Linux; macOS flags bubbleOnlyLaunch in
+    // open-url before ready). Bubble launches skip the hub window — it would
+    // show up in the recording the web app is already capturing.
     const link = extractDeepLinkFromArgv(process.argv);
+    if (link && link.startsWith("ryloom://bubble")) bubbleOnlyLaunch = true;
+    if (!bubbleOnlyLaunch) createMainWindow();
     if (link) handleDeepLink(link);
   });
 
