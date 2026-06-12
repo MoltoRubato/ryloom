@@ -52,6 +52,19 @@ signing in.
 There is also an email + password fallback ("Use email instead") that signs in
 against Supabase directly.
 
+## All `ryloom://` deep-link actions
+
+| Link | What it does |
+| --- | --- |
+| `ryloom://auth#access_token=…&refresh_token=…` | Signs the app in (see above). |
+| `ryloom://record` | Opens the hub and kicks off the record flow (same as the tray's "Start recording"). |
+| `ryloom://bubble?label=…&size=…&frame=…&cameraBg=…` | Floats **only** the always-on-top camera bubble — no hub window. The web recorder fires this while capturing a monitor so the true transparent circle (impossible in a browser — Document PiP is always a rectangular window) is composited into the capture by the OS. `label` is the OS camera name (browser deviceIds are origin-scoped); `frame`/`cameraBg` use the same ids as the web Effects panel. |
+| `ryloom://bubble-close` | Dismisses that bubble when the web recording ends. |
+
+When the app is cold-started by a `ryloom://bubble` link it stays in
+bubble-only mode (tray + bubble, no hub window) so nothing of the app itself
+shows up in the recording the browser is capturing.
+
 > Deep-link registration is most reliable in the **packaged** app. In
 > `pnpm dev` the OS may route `ryloom://` links to Electron only after the
 > first run; if the browser handoff doesn't come back, use the email sign-in

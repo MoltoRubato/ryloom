@@ -180,6 +180,9 @@
       const SIZES = { s: 160, m: 220, l: 320 };
       const params = new URLSearchParams(window.location.search);
       const deviceId = params.get("deviceId") || "";
+      // Web → app handoffs (ryloom://bubble) can't send a deviceId — those are
+      // origin-scoped in browsers — so they send the OS device label instead.
+      const deviceLabel = params.get("label") || "";
       // Camera background (Effects → Backgrounds): none | blur | <painter id>.
       const cameraBg = params.get("cameraBg") || "none";
 
@@ -192,14 +195,29 @@
       const errorEl = document.getElementById("error");
       let stream = null;
 
+      async function resolveDeviceId() {
+        if (deviceId) return deviceId;
+        if (!deviceLabel) return "";
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const match = devices.find(
+            (d) => d.kind === "videoinput" && d.label === deviceLabel,
+          );
+          return match ? match.deviceId : "";
+        } catch {
+          return "";
+        }
+      }
+
       async function startCamera() {
-        const constraints = deviceId
-          ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } }
+        const id = await resolveDeviceId();
+        const constraints = id
+          ? { video: { deviceId: { exact: id }, width: { ideal: 1280 }, height: { ideal: 720 } } }
           : { video: { width: { ideal: 1280 }, height: { ideal: 720 } } };
         try {
           stream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (err) {
-          if (deviceId) {
+          if (id) {
             // Chosen camera may be gone — fall back to the default one.
             try {
               stream = await navigator.mediaDevices.getUserMedia({ video: true });

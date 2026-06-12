@@ -11,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { markDesktopAppDetected } from "@/lib/recorder/desktop-bubble";
 import { createClient } from "@/lib/supabase/client";
 
 /**
@@ -38,6 +39,9 @@ export default function DesktopAuthPage() {
         window.location.href = "/login?next=/desktop/auth";
         return;
       }
+      // The desktop app is what opens this page — remember the install so
+      // the web recorder offers its floating bubble handoff right away.
+      markDesktopAppDetected();
       setDeepLink(
         `ryloom://auth#access_token=${encodeURIComponent(session.access_token)}&refresh_token=${encodeURIComponent(session.refresh_token)}`,
       );
