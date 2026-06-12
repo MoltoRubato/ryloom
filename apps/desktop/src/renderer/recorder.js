@@ -14,6 +14,12 @@
  * is what gets recorded. With no background selected the raw screen stream is
  * recorded directly (zero compositing cost).
  *
+ * Crop (Loom-style "specific window" / "custom size"): the capture source is
+ * always a whole SCREEN; opts.crop = { rect, displayBounds } (both in DIPs)
+ * selects the sub-rectangle that ends up in the video, drawn through the same
+ * canvas pipeline. Recording the screen instead of the window's own surface
+ * is what keeps the floating camera bubble in the picture.
+ *
  * The floating camera bubble is an always-on-top window, so it is composited
  * into the screen capture naturally — no canvas compositing needed for it.
  */
@@ -170,6 +176,8 @@ class Recorder {
   /**
    * @param {{ sourceId: string, micEnabled: boolean, micDeviceId?: string|null,
    *           captureSize?: { width: number, height: number }|null,
+   *           crop?: { rect: { x: number, y: number, width: number, height: number },
+   *                    displayBounds: { x: number, y: number, width: number, height: number } }|null,
    *           effects?: { background?: string, padding?: string, corners?: string },
    *           onScreenEnded?: () => void, onError?: (err: Error) => void }} opts
    */
@@ -215,12 +223,14 @@ class Recorder {
       });
     }
 
-    // 2. Video track: raw screen, or the effects composite canvas.
+    // 2. Video track: raw screen, or the composite canvas (needed for a
+    // background wallpaper and/or a crop rect).
     const effects = opts.effects || {};
     const painter = BACKGROUND_PAINTERS[effects.background];
+    const crop = Recorder._normalizeCrop(opts.crop);
     let videoTracks;
-    if (painter) {
-      videoTracks = await this._startComposite(painter, effects);
+    if (painter || crop) {
+      videoTracks = await this._startComposite(painter || null, effects, crop);
     } else {
       videoTracks = [...this.screenStream.getVideoTracks()];
     }
@@ -296,12 +306,38 @@ class Recorder {
     this.state = "recording";
   }
 
+  /** Validates a crop option; returns null unless both rects are usable. */
+  static _normalizeCrop(crop) {
+    if (!crop || !crop.rect || !crop.displayBounds) return null;
+    const nums = [
+      crop.rect.x,
+      crop.rect.y,
+      crop.rect.width,
+      crop.rect.height,
+      crop.displayBounds.x,
+      crop.displayBounds.y,
+      crop.displayBounds.width,
+      crop.displayBounds.height,
+    ];
+    if (!nums.every(Number.isFinite)) return null;
+    if (
+      crop.rect.width < 2 ||
+      crop.rect.height < 2 ||
+      crop.displayBounds.width < 2 ||
+      crop.displayBounds.height < 2
+    ) {
+      return null;
+    }
+    return crop;
+  }
+
   /**
    * Spins up the canvas pipeline: hidden <video> playing the screen stream,
-   * drawn ~30fps onto a canvas with background + inset + rounded corners.
+   * drawn ~30fps onto a canvas — optionally cropped to a sub-rectangle of the
+   * display, optionally on a wallpaper with inset + rounded corners.
    * Resolves with the canvas stream's video tracks.
    */
-  async _startComposite(painter, effects) {
+  async _startComposite(painter, effects, crop) {
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
@@ -327,14 +363,31 @@ class Recorder {
     const srcW = trackSettings.width || video.videoWidth || 1920;
     const srcH = trackSettings.height || video.videoHeight || 1080;
 
+    // Source rectangle inside the captured frame, in the frame's physical
+    // pixels. Crop rects arrive in DIPs — scaling by the actual track size
+    // (rather than trusting scaleFactor) absorbs HiDPI and any capture-side
+    // downscaling in one step.
+    let sx = 0;
+    let sy = 0;
+    let sw = srcW;
+    let sh = srcH;
+    if (crop) {
+      const scaleX = srcW / crop.displayBounds.width;
+      const scaleY = srcH / crop.displayBounds.height;
+      sx = Math.max(0, Math.min(srcW - 2, (crop.rect.x - crop.displayBounds.x) * scaleX));
+      sy = Math.max(0, Math.min(srcH - 2, (crop.rect.y - crop.displayBounds.y) * scaleY));
+      sw = Math.max(2, Math.min(srcW - sx, crop.rect.width * scaleX));
+      sh = Math.max(2, Math.min(srcH - sy, crop.rect.height * scaleY));
+    }
+
     // Cap the composite size so encoding stays realtime.
     const scale = Math.min(
       1,
-      MAX_COMPOSITE_WIDTH / srcW,
-      MAX_COMPOSITE_HEIGHT / srcH,
+      MAX_COMPOSITE_WIDTH / sw,
+      MAX_COMPOSITE_HEIGHT / sh,
     );
-    const cw = Math.max(2, 2 * Math.round((srcW * scale) / 2));
-    const ch = Math.max(2, 2 * Math.round((srcH * scale) / 2));
+    const cw = Math.max(2, 2 * Math.round((sw * scale) / 2));
+    const ch = Math.max(2, 2 * Math.round((sh * scale) / 2));
 
     const canvas = document.createElement("canvas");
     canvas.width = cw;
@@ -345,31 +398,38 @@ class Recorder {
     this.compositeCanvas = canvas;
     this.compositeDims = { width: cw, height: ch };
 
-    const padFraction =
-      PADDING_FRACTIONS[effects.padding] ?? PADDING_FRACTIONS.md;
+    // Wallpaper inset/corners only make sense with a wallpaper behind them —
+    // a bare crop fills the canvas edge to edge.
+    const padFraction = painter
+      ? PADDING_FRACTIONS[effects.padding] ?? PADDING_FRACTIONS.md
+      : 0;
     const pad = Math.round(Math.min(cw, ch) * padFraction);
-    const rounded = effects.corners !== "square";
+    const rounded = painter ? effects.corners !== "square" : false;
     const innerW = cw - pad * 2;
     const innerH = ch - pad * 2;
     const radius = rounded ? Math.max(8, Math.round(Math.min(cw, ch) * 0.02)) : 0;
 
     const draw = () => {
-      painter(ctx, cw, ch);
-      if (pad > 0) {
-        // Drop shadow under the inset content.
-        ctx.save();
-        ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-        ctx.shadowBlur = Math.max(16, pad * 0.8);
-        ctx.shadowOffsetY = Math.max(4, pad * 0.18);
-        roundRectPath(ctx, pad, pad, innerW, innerH, radius);
-        ctx.fillStyle = "#000";
-        ctx.fill();
-        ctx.restore();
+      if (painter) {
+        painter(ctx, cw, ch);
+        if (pad > 0) {
+          // Drop shadow under the inset content.
+          ctx.save();
+          ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+          ctx.shadowBlur = Math.max(16, pad * 0.8);
+          ctx.shadowOffsetY = Math.max(4, pad * 0.18);
+          roundRectPath(ctx, pad, pad, innerW, innerH, radius);
+          ctx.fillStyle = "#000";
+          ctx.fill();
+          ctx.restore();
+        }
       }
       ctx.save();
-      roundRectPath(ctx, pad, pad, innerW, innerH, radius);
-      ctx.clip();
-      ctx.drawImage(video, pad, pad, innerW, innerH);
+      if (radius > 0) {
+        roundRectPath(ctx, pad, pad, innerW, innerH, radius);
+        ctx.clip();
+      }
+      ctx.drawImage(video, sx, sy, sw, sh, pad, pad, innerW, innerH);
       ctx.restore();
     };
 

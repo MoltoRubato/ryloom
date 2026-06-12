@@ -28,6 +28,7 @@ const {
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { execFile } = require("child_process");
 
 const DEFAULT_APP_URL = "https://ryloom-web.vercel.app";
 
@@ -36,6 +37,9 @@ let bubbleWindow = null;
 let controlsWindow = null;
 let countdownWindow = null;
 let notesWindow = null;
+/** Full-display "drag a rectangle" overlays (custom-size capture). */
+let regionWindows = [];
+let regionResolve = null;
 let tray = null;
 let isRecording = false;
 /** Deep-link auth tokens that arrived before the renderer was ready. */
@@ -208,6 +212,8 @@ function deliverAuthTokens(tokens) {
 /** ryloom://record → same flow as the tray's "Start recording". */
 function deliverTrayRecord() {
   if (isRecording) return;
+  // A pending custom-area pick would leave capturable overlays on screen.
+  settleRegionSelect(null);
   if (mainWindow && !mainWindow.isDestroyed() && rendererReady) {
     mainWindow.webContents.send("tray-record");
   } else {
@@ -387,6 +393,140 @@ function displayForId(displayId) {
     if (match) return match;
   }
   return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+/** Clips `rect` to `bounds`; returns null when they don't overlap. */
+function intersectRects(rect, bounds) {
+  const x1 = Math.max(rect.x, bounds.x);
+  const y1 = Math.max(rect.y, bounds.y);
+  const x2 = Math.min(rect.x + rect.width, bounds.x + bounds.width);
+  const y2 = Math.min(rect.y + rect.height, bounds.y + bounds.height);
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+/**
+ * Resolves a desktopCapturer WINDOW source's on-screen rect, in the same
+ * coordinate space as Electron's screen API (DIPs, global top-left origin).
+ *
+ * This powers Loom-style window recording: instead of capturing the window's
+ * own pixel buffer (which can never contain the floating camera bubble — a
+ * separate always-on-top window), the renderer captures the ENTIRE screen and
+ * crops to this rect, so the bubble stays in the video.
+ *
+ * macOS-only: the source id ("window:1234:0") carries the CGWindowID and a
+ * JXA one-liner reads its bounds via CGWindowListCopyWindowInfo — no native
+ * module needed. CGWindow bounds are top-left-origin global points, which is
+ * exactly Electron's DIP space. Resolves null when the window is gone or on
+ * other platforms; callers fall back to direct window capture.
+ */
+function getWindowBounds(sourceId) {
+  if (process.platform !== "darwin") return Promise.resolve(null);
+  const match = /^window:(\d+)/.exec(String(sourceId || ""));
+  if (!match) return Promise.resolve(null);
+  // 8 = kCGWindowListOptionIncludingWindow (the JXA bridge exports no consts).
+  // castRefToObject, not CFBridgingRelease — the latter segfaults osascript.
+  const script = [
+    'ObjC.import("CoreGraphics");',
+    `var ref = $.CGWindowListCopyWindowInfo(8, ${Number(match[1])});`,
+    "var arr = ObjC.deepUnwrap(ObjC.castRefToObject(ref));",
+    "JSON.stringify(arr && arr[0] ? arr[0].kCGWindowBounds : null);",
+  ].join("\n");
+  return new Promise((resolve) => {
+    execFile(
+      "osascript",
+      ["-l", "JavaScript", "-e", script],
+      { timeout: 3000 },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        try {
+          const bounds = JSON.parse(String(stdout).trim());
+          const width = Math.round(Number(bounds && bounds.Width));
+          const height = Math.round(Number(bounds && bounds.Height));
+          if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+            resolve(null);
+            return;
+          }
+          resolve({
+            x: Math.round(Number(bounds.X) || 0),
+            y: Math.round(Number(bounds.Y) || 0),
+            width,
+            height,
+          });
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Custom-size region selector — one full-display overlay per screen where the
+// user drags out the rectangle to record. Recording then captures that whole
+// screen and crops to the rect (same trick as window recording), so the
+// camera bubble lands in the video.
+// ---------------------------------------------------------------------------
+
+function settleRegionSelect(result) {
+  const resolve = regionResolve;
+  regionResolve = null;
+  const windows = regionWindows;
+  regionWindows = [];
+  for (const win of windows) {
+    if (!win.isDestroyed()) win.destroy();
+  }
+  if (resolve) resolve(result);
+}
+
+/** Resolves { displayId, rect } (global DIPs) or null when canceled. */
+function openRegionSelector() {
+  if (regionResolve) return Promise.resolve(null); // a pick is already running
+  return new Promise((resolve) => {
+    regionResolve = resolve;
+    const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    for (const display of screen.getAllDisplays()) {
+      const win = new BrowserWindow({
+        ...display.bounds,
+        frame: false,
+        transparent: true,
+        hasShadow: false,
+        resizable: false,
+        movable: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        enableLargerThanScreen: true,
+        webPreferences: {
+          nodeIntegration: true,
+          contextIsolation: false,
+          backgroundThrottling: false,
+        },
+      });
+      win.setAlwaysOnTop(true, "screen-saver");
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      win.setBounds(display.bounds); // transparent windows can shrink on create
+      win.loadFile(path.join(__dirname, "renderer", "region.html"), {
+        query: { displayId: String(display.id) },
+      });
+      win.on("closed", () => {
+        regionWindows = regionWindows.filter((w) => w !== win);
+        // Last overlay externally closed mid-pick → treat as cancel.
+        if (regionResolve && regionWindows.length === 0) settleRegionSelect(null);
+      });
+      if (display.id === cursorDisplay.id) {
+        win.once("ready-to-show", () => {
+          if (!win.isDestroyed()) win.focus(); // Esc-to-cancel works immediately
+        });
+      }
+      regionWindows.push(win);
+    }
+  });
 }
 
 function openControls(displayId) {
@@ -629,8 +769,11 @@ function registerIpc() {
       const isScreen = source.id.startsWith("screen");
       // Physical pixel size of the display — the renderer pins its capture
       // constraints to this so Chromium doesn't apply its 2880x1800 default
-      // cap and downscale Retina/4K/5K captures (blurry text).
+      // cap and downscale Retina/4K/5K captures (blurry text). displayBounds
+      // (DIPs, global) lets the renderer map window/region crop rects onto
+      // the captured frame.
       let captureSize = null;
+      let displayBounds = null;
       if (isScreen) {
         const display = displays.find(
           (d) => String(d.id) === String(source.display_id),
@@ -640,6 +783,7 @@ function registerIpc() {
             width: Math.round(display.bounds.width * display.scaleFactor),
             height: Math.round(display.bounds.height * display.scaleFactor),
           };
+          displayBounds = { ...display.bounds };
         }
       }
       return {
@@ -647,6 +791,7 @@ function registerIpc() {
         name: source.name,
         displayId: source.display_id || null,
         captureSize,
+        displayBounds,
         thumbnailDataUrl:
           source.thumbnail && !source.thumbnail.isEmpty()
             ? source.thumbnail.toDataURL()
@@ -658,6 +803,52 @@ function registerIpc() {
         isScreen,
       };
     });
+  });
+
+  // Window rect for Loom-style "specific window" capture (screen + crop).
+  ipcMain.handle("get-window-bounds", (_event, sourceId) =>
+    getWindowBounds(sourceId),
+  );
+
+  // --- Custom-size region selection ----------------------------------------
+
+  ipcMain.handle("region-select", () => openRegionSelector());
+
+  ipcMain.on("region-done", (event, payload) => {
+    if (!regionResolve) return;
+    const fromOverlay = regionWindows.some(
+      (win) => !win.isDestroyed() && event.sender === win.webContents,
+    );
+    if (!fromOverlay) return;
+    if (!payload || !payload.rect) {
+      settleRegionSelect(null);
+      return;
+    }
+    const rx = Number(payload.rect.x);
+    const ry = Number(payload.rect.y);
+    const rw = Number(payload.rect.width);
+    const rh = Number(payload.rect.height);
+    if (![rx, ry, rw, rh].every(Number.isFinite)) {
+      settleRegionSelect(null);
+      return;
+    }
+    // Overlay coords are display-relative DIPs — translate to global and
+    // clip to the display so the rect is always croppable from its capture.
+    const display = displayForId(payload.displayId);
+    const rect = intersectRects(
+      {
+        x: display.bounds.x + Math.round(rx),
+        y: display.bounds.y + Math.round(ry),
+        width: Math.round(rw),
+        height: Math.round(rh),
+      },
+      display.bounds,
+    );
+    settleRegionSelect(
+      rect && rect.width >= 16 && rect.height >= 16
+        ? { displayId: display.id, rect }
+        : null,
+    );
   });
 
   ipcMain.handle("media-status", () => {
@@ -772,6 +963,38 @@ function registerIpc() {
       y: Math.round(centerY - next / 2),
       width: next,
       height: next,
+    });
+    return true;
+  });
+
+  // Cropped recordings (specific window / custom area) only contain what's
+  // inside the crop rect — nudge the bubble into it, or the camera would
+  // silently vanish from the video. No-op when it already fits.
+  ipcMain.handle("bubble-move-into", (_event, rect) => {
+    if (!bubbleWindow || bubbleWindow.isDestroyed() || !rect) return false;
+    const x = Number(rect.x);
+    const y = Number(rect.y);
+    const width = Number(rect.width);
+    const height = Number(rect.height);
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+      return false;
+    }
+    const bounds = bubbleWindow.getBounds();
+    const inside =
+      bounds.x >= x &&
+      bounds.y >= y &&
+      bounds.x + bounds.width <= x + width &&
+      bounds.y + bounds.height <= y + height;
+    if (inside) return true;
+    // Bottom-left corner of the crop, the classic bubble spot. If the rect is
+    // smaller than the bubble it pins to the rect's origin and overflows.
+    const margin = 20;
+    const clamp = (value, lo, hi) => Math.min(Math.max(value, lo), Math.max(lo, hi));
+    bubbleWindow.setBounds({
+      x: Math.round(clamp(x + margin, x, x + width - bounds.width - margin)),
+      y: Math.round(clamp(y + height - bounds.height - margin, y, y + height - bounds.height)),
+      width: bounds.width,
+      height: bounds.height,
     });
     return true;
   });
@@ -897,5 +1120,6 @@ function bootstrap() {
     closeControls();
     closeCountdown();
     closeNotes();
+    settleRegionSelect(null);
   });
 }
