@@ -9,6 +9,7 @@ import {
   Mic,
   MicOff,
   Monitor,
+  MonitorPlay,
   NotebookPen,
   PictureInPicture2,
   Sparkles,
@@ -90,6 +91,9 @@ export function SetupPanel({
   workspaceId,
   starting,
   notesOpen,
+  desktopAppDetected,
+  preferDesktopApp,
+  onPreferDesktopAppChange,
   onOpenEffects,
   onToggleNotes,
   onStart,
@@ -100,6 +104,11 @@ export function SetupPanel({
   workspaceId: string | null;
   starting: boolean;
   notesOpen: boolean;
+  /** The Ryloom desktop app has been seen on this machine. */
+  desktopAppDetected: boolean;
+  /** Start recording opens the desktop app instead of the browser recorder. */
+  preferDesktopApp: boolean;
+  onPreferDesktopAppChange: (preferred: boolean) => void;
   onOpenEffects: () => void;
   onToggleNotes: () => void;
   onStart: () => void;
@@ -477,6 +486,30 @@ export function SetupPanel({
                 })}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Desktop app priority — shown once the app has been seen on this
+            machine. On = "Start recording" hands the whole take to the app
+            (true always-on-top bubble, controls invisible to the capture). */}
+        {desktopAppDetected && (
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-card/40 px-4 py-3">
+            <div className="flex items-start gap-3">
+              <MonitorPlay className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div>
+                <Label htmlFor="desktop-app" className="text-sm font-medium">
+                  Record with the desktop app
+                </Label>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Opens Ryloom on your computer — best quality, true floating camera bubble.
+                </p>
+              </div>
+            </div>
+            <Switch
+              id="desktop-app"
+              checked={preferDesktopApp}
+              onCheckedChange={onPreferDesktopAppChange}
+            />
           </div>
         )}
 
