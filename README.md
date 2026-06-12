@@ -15,9 +15,6 @@ Ryloom is an internal tool: **every feature is enabled for everyone, with no
 limits and no billing.** Access is restricted to `@lyratechnologies.com.au`
 accounts (configurable via `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`).
 
-- 📦 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — step-by-step deploy guide (Supabase → Vercel → worker → desktop app)
-- 👋 **[docs/TEAM-GUIDE.md](docs/TEAM-GUIDE.md)** — features list + setup guide to send to coworkers
-
 ## What it does
 
 **Recording**
