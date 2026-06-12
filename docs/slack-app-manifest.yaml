@@ -1,0 +1,43 @@
+# Slack app manifest for Ryloom inline video unfurls.
+#
+# Slack only renders an inline video player for links from a registered app
+# (or its own whitelist of big providers) — og:video / twitter:player tags
+# alone always fall back to an image card. This app subscribes to
+# link_shared events for the Ryloom domain and answers with a Block Kit
+# video block via chat.unfurl (see apps/web/src/app/api/slack/events).
+#
+# Setup (~2 minutes):
+#   1. https://api.slack.com/apps?new_app=1 → "From a manifest" → pick your
+#      workspace → paste this file (fix the domain/URL if not ryloom-web).
+#   2. Install the app to the workspace.
+#   3. Copy "Signing Secret" (Basic Information) → Vercel env
+#      SLACK_SIGNING_SECRET, and "Bot User OAuth Token" (xoxb-…, OAuth &
+#      Permissions) → SLACK_BOT_TOKEN. Redeploy.
+#   4. Event Subscriptions → Request URL should show "Verified" (retry the
+#      check after the redeploy if you configured it before the env vars).
+#   5. Paste any public share link in Slack — it unfurls with a player.
+
+display_information:
+  name: Ryloom
+  description: Inline video players for Ryloom share links
+  background_color: "#1a1a2e"
+features:
+  bot_user:
+    display_name: Ryloom
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - links:read
+      - links:write
+      - links.embed:write
+settings:
+  event_subscriptions:
+    request_url: https://ryloom-web.vercel.app/api/slack/events
+    bot_events:
+      - link_shared
+  unfurl_domains:
+    - ryloom-web.vercel.app
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

@@ -446,6 +446,29 @@ the `extension/` folder from a checkout. Open the extension's options and set
 the app URL to your production domain. `Alt+Shift+R` opens the recorder with
 the current tab pre-filled.
 
+## Step 6.5 — Slack inline video unfurls (optional, 2 min)
+
+Slack never renders a playable video from og:video / twitter:player tags on
+arbitrary domains — only registered apps (or Slack's own provider whitelist:
+YouTube, Loom, Vimeo…) get the inline player. Discord/iMessage/Facebook work
+from the meta tags alone; for Slack, create the tiny unfurl app:
+
+1. [api.slack.com/apps?new_app=1](https://api.slack.com/apps?new_app=1) →
+   **From a manifest** → pick your workspace → paste
+   `docs/slack-app-manifest.yaml` (adjust the domain if you're not on
+   `ryloom-web.vercel.app`).
+2. **Install to Workspace.**
+3. Copy **Signing Secret** (Basic Information) → Vercel env
+   `SLACK_SIGNING_SECRET`; copy the **Bot User OAuth Token** (`xoxb-…`,
+   OAuth & Permissions) → `SLACK_BOT_TOKEN`. Redeploy.
+4. Event Subscriptions → the Request URL
+   (`/api/slack/events`) should show **Verified** — hit "Retry" if you
+   configured it before the env vars were live.
+
+New share links posted in that workspace now unfurl with an inline player
+(Slack caches unfurls per exact URL, so re-test old links with `?v=2`
+appended).
+
 ## Step 7 — Day-2 operations
 
 - **Invite the team:** they can sign up directly (any `@lyratechnologies.com.au`

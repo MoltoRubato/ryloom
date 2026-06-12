@@ -29,6 +29,10 @@ export const env = createEnv({
     // Alternative wake backend: a plain webhook (e.g. the Modal endpoint).
     WORKER_WAKE_URL: z.string().url().optional(),
     WORKER_WAKE_TOKEN: z.string().optional(),
+    // Slack app for inline video unfurls (Slack only renders video players
+    // for registered apps, never from meta tags) — see docs/slack-app-manifest.yaml.
+    SLACK_SIGNING_SECRET: z.string().optional(),
+    SLACK_BOT_TOKEN: z.string().optional(),
     // Cloudflare R2 (S3 API) — the video media plane (raw + processed bytes).
     R2_ACCOUNT_ID: z.string().min(1),
     R2_ACCESS_KEY_ID: z.string().min(1),
@@ -64,6 +68,8 @@ export const env = createEnv({
     WORKER_BACKSTOP_TOKEN: process.env.WORKER_BACKSTOP_TOKEN,
     WORKER_WAKE_URL: process.env.WORKER_WAKE_URL,
     WORKER_WAKE_TOKEN: process.env.WORKER_WAKE_TOKEN,
+    SLACK_SIGNING_SECRET: process.env.SLACK_SIGNING_SECRET,
+    SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
     R2_ACCOUNT_ID: process.env.R2_ACCOUNT_ID,
     R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
     R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
