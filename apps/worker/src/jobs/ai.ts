@@ -118,6 +118,11 @@ const PROMPTS: Record<AiOutputType, PromptDef> = {
     instruction:
       "Write a recap email for the people involved in this recording. Put the subject on the first line as 'Subject: ...', then a brief recap of what was covered, decisions made, and next steps with owners where mentioned.",
   },
+  release_notes: {
+    json: false,
+    instruction:
+      "Write release notes in markdown based on this recording. Start with a one-line summary, then group changes under ## New, ## Improved, and ## Fixed headings (omit any section with no items). Use concise, user-facing bullet points — describe what changed for the user, not implementation detail.",
+  },
   doc: {
     json: false,
     instruction:

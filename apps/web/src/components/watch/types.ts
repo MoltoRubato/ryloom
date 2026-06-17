@@ -51,34 +51,56 @@ function unwrapArray(data: unknown, keys: string[]): unknown[] {
   return [];
 }
 
+/**
+ * Normalize a single comment row. The `comment.list` router returns threads as
+ * `{ comment, author, replies }` (fields nested under `comment`), but older /
+ * flat shapes put the fields directly on the object — handle both.
+ */
+function normalizeOneComment(raw: unknown): WatchComment | null {
+  const outer = asRecord(raw);
+  if (!outer) return null;
+  const row = asRecord(outer.comment) ?? outer;
+  if (typeof row.id !== "string") return null;
+  // Author lives at the thread level (`outer.author`) for wrapped rows, or
+  // alongside the fields (`row.author`) for flat rows.
+  const author = asRecord(outer.author) ?? asRecord(row.author);
+  const status =
+    row.status === "resolved" || row.status === "deleted" ? row.status : "open";
+  return {
+    id: row.id,
+    body: typeof row.body === "string" ? row.body : "",
+    timestampMs: typeof row.timestampMs === "number" ? row.timestampMs : null,
+    parentCommentId:
+      typeof row.parentCommentId === "string" ? row.parentCommentId : null,
+    status,
+    authorId: typeof row.authorId === "string" ? row.authorId : null,
+    guestName: typeof row.guestName === "string" ? row.guestName : null,
+    createdAt: toDate(row.createdAt),
+    author: author
+      ? {
+          id: typeof author.id === "string" ? author.id : undefined,
+          name: typeof author.name === "string" ? author.name : null,
+          email: typeof author.email === "string" ? author.email : null,
+          avatarUrl: typeof author.avatarUrl === "string" ? author.avatarUrl : null,
+        }
+      : null,
+  } satisfies WatchComment;
+}
+
 export function normalizeComments(data: unknown): WatchComment[] {
   return unwrapArray(data, ["items", "comments"]).flatMap((raw) => {
-    const row = asRecord(raw);
-    if (!row || typeof row.id !== "string") return [];
-    const author = asRecord(row.author);
-    const status =
-      row.status === "resolved" || row.status === "deleted" ? row.status : "open";
-    return [
-      {
-        id: row.id,
-        body: typeof row.body === "string" ? row.body : "",
-        timestampMs: typeof row.timestampMs === "number" ? row.timestampMs : null,
-        parentCommentId:
-          typeof row.parentCommentId === "string" ? row.parentCommentId : null,
-        status,
-        authorId: typeof row.authorId === "string" ? row.authorId : null,
-        guestName: typeof row.guestName === "string" ? row.guestName : null,
-        createdAt: toDate(row.createdAt),
-        author: author
-          ? {
-              id: typeof author.id === "string" ? author.id : undefined,
-              name: typeof author.name === "string" ? author.name : null,
-              email: typeof author.email === "string" ? author.email : null,
-              avatarUrl: typeof author.avatarUrl === "string" ? author.avatarUrl : null,
-            }
-          : null,
-      } satisfies WatchComment,
-    ];
+    const top = normalizeOneComment(raw);
+    if (!top) return [];
+    // Wrapped threads carry their replies in a `replies` array; flatten them
+    // into the same list (each reply already points at its parent thread).
+    const outer = asRecord(raw);
+    const replies = Array.isArray(outer?.replies)
+      ? outer.replies.flatMap((reply) => {
+          const normalized = normalizeOneComment(reply);
+          return normalized ? [normalized] : [];
+        })
+      : [];
+    return [top, ...replies];
   });
 }
 

@@ -35,6 +35,7 @@ const AI_OUTPUT_TYPES = [
   "faq",
   "meeting_notes",
   "recap_email",
+  "release_notes",
   "doc",
 ] as const;
 
@@ -50,6 +51,7 @@ const DOC_TYPES = new Set<(typeof AI_OUTPUT_TYPES)[number]>([
   "faq",
   "meeting_notes",
   "recap_email",
+  "release_notes",
   "doc",
 ]);
 
