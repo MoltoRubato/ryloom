@@ -3,9 +3,15 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 
 /**
+ * The fixed Ryloom brand violet. The mark is locked to this exact hex —
+ * NOT the themeable `--primary` token — so it renders identically to the
+ * desktop app icon, the tray mark and public/favicon.svg everywhere.
+ */
+export const RYLOOM_BRAND_VIOLET = "#625DF5";
+
+/**
  * Ryloom mark — violet rounded square with a play circle.
- * Mirrors public/favicon.svg, with the square driven by the primary token so
- * it adapts to theme and brand overrides.
+ * Byte-faithful to public/favicon.svg and the desktop app icon/tray mark.
  */
 export function RyloomLogo({ className }: { className?: string }) {
   return (
@@ -15,7 +21,7 @@ export function RyloomLogo({ className }: { className?: string }) {
       className={cn("size-7", className)}
       aria-hidden="true"
     >
-      <rect width="32" height="32" rx="8" className="fill-primary" />
+      <rect width="32" height="32" rx="8" fill={RYLOOM_BRAND_VIOLET} />
       <circle
         cx="16"
         cy="16"

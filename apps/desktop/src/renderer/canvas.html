@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ryloom Canvas</title>
+    <style>
+      :root {
+        --bg: #17151f;
+        --card: #221f2e;
+        --border: rgba(255, 255, 255, 0.12);
+        --border-strong: rgba(255, 255, 255, 0.22);
+        --primary: #625df5;
+        --primary-hover: #726df7;
+        --text: #f4f3fa;
+        --text-muted: #c9c6d6;
+        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+          Arial, sans-serif;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body {
+        width: 100%; height: 100%; overflow: hidden;
+        background: var(--bg); font-family: var(--font); color: var(--text);
+        -webkit-font-smoothing: antialiased; user-select: none;
+      }
+
+      #backdrop { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+      #slots { position: fixed; inset: 0; }
+      .slot { position: absolute; display: flex; align-items: flex-start; }
+      .slot .bullet {
+        flex: none; width: 0.36em; height: 0.36em;
+        margin-top: 0.34em; margin-right: 0.59em; border-radius: 999px;
+      }
+      .editor {
+        flex: 1; min-width: 2rem; cursor: text; white-space: pre-wrap;
+        overflow-wrap: anywhere; outline: none;
+        user-select: text; -webkit-user-select: text;
+      }
+      .editor:empty::before { content: attr(data-placeholder); opacity: 0.45; pointer-events: none; }
+      .editor:focus { outline: 2px dashed rgba(255, 255, 255, 0.5); outline-offset: 6px; border-radius: 4px; }
+
+      /* Mock camera bubble — shows where the real (separate) camera window will
+         float. Replaced by the real OS bubble window once recording starts. */
+      #mock-bubble {
+        position: fixed; border-radius: 50%; overflow: hidden;
+        background: radial-gradient(circle at 40% 35%, #5b6472, #232734);
+        border: 3px solid rgba(255, 255, 255, 0.92);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+        display: flex; align-items: center; justify-content: center;
+        color: rgba(255, 255, 255, 0.55); font-size: 13px; font-weight: 600;
+        z-index: 4;
+      }
+      /* Mirror like a real selfie camera — matches the recording bubble. */
+      #mock-bubble video { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
+      #mock-bubble.hidden { display: none; }
+
+      /* Top-right utility cluster */
+      #stage-controls {
+        position: fixed; top: 16px; right: 16px; display: flex; align-items: center; gap: 8px; z-index: 20;
+      }
+      .pill {
+        display: inline-flex; align-items: center; gap: 7px;
+        padding: 8px 12px; border-radius: 999px; cursor: pointer;
+        font-size: 12.5px; font-weight: 600; color: var(--text-muted);
+        background: rgba(26, 23, 36, 0.82); border: 1px solid var(--border);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      }
+      .pill .dot { width: 14px; height: 14px; border-radius: 5px; border: 1.5px solid var(--text-muted); }
+      .pill.on { color: var(--text); border-color: rgba(98, 93, 245, 0.6); }
+      .pill.on .dot { background: var(--primary); border-color: var(--primary); }
+      .icon-btn {
+        width: 38px; height: 38px; border-radius: 999px; cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center;
+        color: var(--text-muted); background: rgba(26, 23, 36, 0.82); border: 1px solid var(--border);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      }
+      .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
+
+      /* Bottom-center compose bar (Background / Text layout / Templates) */
+      #composebar {
+        position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+        display: flex; align-items: center; gap: 6px; z-index: 20;
+        padding: 8px; border-radius: 16px;
+        background: rgba(26, 23, 36, 0.86); border: 1px solid var(--border);
+        box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%);
+      }
+      .composetab {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 9px 14px; border-radius: 11px; cursor: pointer;
+        font-size: 13.5px; font-weight: 600; color: var(--text);
+        background: transparent; border: none; font-family: inherit;
+      }
+      .composetab:hover { background: rgba(255, 255, 255, 0.07); }
+      .composetab.active { background: rgba(98, 93, 245, 0.22); }
+      .composetab svg { width: 18px; height: 18px; }
+
+      /* Bottom-right record button */
+      #start-cluster { position: fixed; right: 24px; bottom: 24px; z-index: 20; }
+      .btn-record {
+        display: inline-flex; align-items: center; gap: 9px;
+        padding: 13px 20px; border-radius: 14px; cursor: pointer;
+        font-size: 15px; font-weight: 600; color: #fff; border: none; font-family: inherit;
+        background: var(--primary); box-shadow: 0 8px 24px rgba(98, 93, 245, 0.45);
+      }
+      .btn-record:hover { background: var(--primary-hover); }
+      .btn-record .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ff5f57; box-shadow: 0 0 0 3px rgba(255, 95, 87, 0.3); }
+
+      /* Picker modal */
+      #picker { position: fixed; inset: 0; z-index: 15; display: none; }
+      #picker.open { display: block; }
+      #picker .scrim { position: absolute; inset: 0; background: rgba(10, 9, 16, 0.45); }
+      #picker .panel {
+        position: absolute; left: 50%; top: 26px; transform: translateX(-50%);
+        width: min(1040px, calc(100vw - 48px)); max-height: calc(100vh - 150px);
+        background: #fff; color: #1c1a22; border-radius: 22px;
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+        display: flex; flex-direction: column; overflow: hidden;
+      }
+      #picker .phead { display: flex; align-items: center; justify-content: space-between; padding: 26px 30px 14px; }
+      #picker .phead h2 { font-size: 26px; font-weight: 800; letter-spacing: -0.01em; }
+      #picker .pclose {
+        width: 40px; height: 40px; border-radius: 999px; cursor: pointer; border: none; background: transparent;
+        display: inline-flex; align-items: center; justify-content: center; color: #2a2730;
+      }
+      #picker .pclose:hover { background: rgba(0, 0, 0, 0.06); }
+      #picker .pbody { padding: 6px 30px 30px; overflow-y: auto; }
+      #picker .psub { font-size: 16px; font-weight: 700; color: #1c1a22; margin: 10px 2px 12px; }
+      #picker .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+
+      .tile {
+        position: relative; width: 100%; aspect-ratio: 16 / 9;
+        border-radius: 14px; overflow: hidden; cursor: pointer;
+        border: 3px solid transparent; background: #eee;
+        transition: border-color 0.12s ease, transform 0.06s ease;
+      }
+      .tile:hover { border-color: rgba(98, 93, 245, 0.45); }
+      .tile.selected { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(98, 93, 245, 0.25); }
+      .tile:active { transform: scale(0.99); }
+      .tile canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      .tile .t-slot { position: absolute; display: flex; align-items: flex-start; }
+      .tile .t-slot .t-bullet { flex: none; width: 0.36em; height: 0.36em; margin-top: 0.34em; margin-right: 0.55em; border-radius: 999px; }
+      .tile .t-text { flex: 1; white-space: pre-wrap; overflow: hidden; }
+      .tile .t-bubble {
+        position: absolute; border-radius: 50%;
+        background: radial-gradient(circle at 40% 35%, #5b6472, #232734);
+        border: 2px solid rgba(255, 255, 255, 0.92);
+      }
+
+      /* Recording look — clean backdrop + text only. */
+      body.recording #stage-controls,
+      body.recording #composebar,
+      body.recording #start-cluster,
+      body.recording #picker,
+      body.recording #mock-bubble { display: none !important; }
+      body.recording .editor { caret-color: transparent !important; outline: none !important; }
+      body.recording .editor:empty::before { content: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="backdrop"></canvas>
+    <div id="slots"></div>
+    <div id="mock-bubble">you</div>
+
+    <div id="stage-controls">
+      <button class="pill" id="cam-pill"><span class="dot"></span>Camera</button>
+      <button class="pill" id="countdown-pill"><span class="dot"></span>Countdown</button>
+      <button class="icon-btn" id="btn-close" title="Close (Esc)" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div id="composebar">
+      <button class="composetab" data-pick="background">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>
+        Background
+      </button>
+      <button class="composetab" data-pick="layout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
+        Text layout
+      </button>
+      <button class="composetab" data-pick="templates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
+        Templates
+      </button>
+    </div>
+
+    <div id="start-cluster">
+      <button class="btn-record" id="btn-start"><span class="rec-dot"></span>Start recording</button>
+    </div>
+
+    <div id="picker">
+      <div class="scrim" id="picker-scrim"></div>
+      <div class="panel">
+        <div class="phead">
+          <h2 id="picker-title">Templates</h2>
+          <button class="pclose" id="picker-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="pbody" id="picker-body"></div>
+      </div>
+    </div>
+
+    <script>
+      "use strict";
+      const { ipcRenderer } = require("electron");
+      const SCENE = require("./canvas-scene.js");
+
+      const params = new URLSearchParams(location.search);
+      let camOn = params.get("camOn") === "1";
+      let countdownOn = params.get("countdownOn") !== "0";
+      const camDeviceId = params.get("camDeviceId") || "";
+      let recording = false;
+      let openPicker = null;
+      let avatar = null;
+
+      const DEFAULT_START = { enabled: true, template: "none", background: "gradient", layout: "centered", texts: {} };
+      let scene = { ...DEFAULT_START };
+
+      const backdrop = document.getElementById("backdrop");
+      const slotsEl = document.getElementById("slots");
+      const mockBubble = document.getElementById("mock-bubble");
+      const camPill = document.getElementById("cam-pill");
+      const countdownPill = document.getElementById("countdown-pill");
+      const pickerEl = document.getElementById("picker");
+      const pickerBody = document.getElementById("picker-body");
+      const pickerTitle = document.getElementById("picker-title");
+
+      function painterFor(bg) {
+        return SCENE.CANVAS_BACKGROUND_PAINTERS[bg] || SCENE.CANVAS_BACKGROUND_PAINTERS.gradient;
+      }
+
+      function paintBackdrop() {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        backdrop.width = Math.max(2, Math.round(window.innerWidth * dpr));
+        backdrop.height = Math.max(2, Math.round(window.innerHeight * dpr));
+        const ctx = backdrop.getContext("2d");
+        if (ctx) painterFor(scene.background)(ctx, backdrop.width, backdrop.height);
+      }
+
+      function renderSlots() {
+        slotsEl.innerHTML = "";
+        const ink = SCENE.canvasInkColor(scene.background);
+        for (const slot of SCENE.CANVAS_LAYOUTS[scene.layout] || []) {
+          const wrap = document.createElement("div");
+          wrap.className = "slot";
+          wrap.style.left = slot.x * 100 + "%";
+          wrap.style.top = slot.y * 100 + "%";
+          wrap.style.width = slot.w * 100 + "%";
+          wrap.style.fontSize = slot.size * 100 + "vw";
+          wrap.style.fontWeight = String(slot.weight);
+          wrap.style.lineHeight = String(slot.lineHeight);
+          wrap.style.color = ink;
+          if (ink === "#ffffff") wrap.style.textShadow = "0 0.04em 0.18em rgba(10,8,24,0.35)";
+          if (slot.bullet) {
+            const b = document.createElement("span");
+            b.className = "bullet"; b.style.background = ink;
+            wrap.appendChild(b);
+          }
+          const ed = document.createElement("div");
+          ed.className = "editor";
+          ed.setAttribute("contenteditable", recording ? "false" : "true");
+          ed.spellcheck = false;
+          ed.dataset.placeholder = slot.placeholder;
+          ed.style.textAlign = slot.align;
+          ed.style.caretColor = ink;
+          ed.textContent = scene.texts[slot.key] || "";
+          ed.addEventListener("input", () => {
+            scene.texts[slot.key] = ed.innerText.replace(/\n$/, "");
+            persist();
+          });
+          wrap.appendChild(ed);
+          slotsEl.appendChild(wrap);
+        }
+      }
+
+      function placeBubble() {
+        const show = camOn && !recording;
+        mockBubble.classList.toggle("hidden", !show);
+        if (!show) return;
+        // The live <video> (if present) fills the bubble; otherwise show the
+        // last still, or a label until the feed comes up.
+        if (!camVideo) {
+          if (avatar) {
+            mockBubble.style.backgroundImage = `url("${avatar}")`;
+            mockBubble.style.backgroundSize = "cover";
+            mockBubble.style.backgroundPosition = "center";
+            mockBubble.textContent = "";
+          } else {
+            mockBubble.style.backgroundImage = "";
+            mockBubble.textContent = "you";
+          }
+        }
+        const H = window.innerHeight, W = window.innerWidth;
+        if (scene.template === "bubble") {
+          const d = Math.round(H * 0.42);
+          mockBubble.style.width = mockBubble.style.height = d + "px";
+          mockBubble.style.left = Math.round(W / 2 - d / 2) + "px";
+          mockBubble.style.top = Math.round(H / 2 - d / 2) + "px";
+        } else {
+          const d = Math.round(H * 0.16);
+          mockBubble.style.width = mockBubble.style.height = d + "px";
+          mockBubble.style.left = Math.round(W * 0.05) + "px";
+          mockBubble.style.top = Math.round(H - d - H * 0.06) + "px";
+        }
+      }
+
+      function render() { paintBackdrop(); renderSlots(); placeBubble(); }
+
+      let persistTimer = null;
+      function persist() {
+        scene.enabled = true;
+        clearTimeout(persistTimer);
+        persistTimer = setTimeout(() => ipcRenderer.invoke("store-set", "canvasScene", scene).catch(() => {}), 250);
+      }
+
+      // The stage shows the camera LIVE while composing — what you see is what
+      // gets recorded. The canvas window holds the camera during compose (the
+      // real bubble window isn't open yet) and releases it the instant a take
+      // starts so the recording bubble can take over. A still is also grabbed
+      // off the live feed for the small picker tiles.
+      let camStream = null;
+      let camVideo = null;
+
+      async function startLiveCamera() {
+        if (camStream || !camOn || recording) return;
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: camDeviceId ? { deviceId: { exact: camDeviceId } } : true,
+          });
+        } catch {
+          return; // permission denied / busy — fall back to the snapshot/label
+        }
+        if (!camOn || recording) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        camStream = stream;
+        camVideo = document.createElement("video");
+        camVideo.muted = true;
+        camVideo.playsInline = true;
+        camVideo.autoplay = true;
+        camVideo.srcObject = stream;
+        await camVideo.play().catch(() => {});
+        mockBubble.textContent = "";
+        mockBubble.style.backgroundImage = "";
+        mockBubble.appendChild(camVideo);
+        // Grab a still off the live feed for the small picker tiles.
+        setTimeout(() => {
+          if (!camVideo) return;
+          const vw = camVideo.videoWidth || 640;
+          const vh = camVideo.videoHeight || 480;
+          const side = Math.min(vw, vh);
+          if (!side) return;
+          const c = document.createElement("canvas");
+          c.width = 240;
+          c.height = 240;
+          const sctx = c.getContext("2d");
+          sctx.translate(240, 0); // mirror to match the selfie-mirrored bubble
+          sctx.scale(-1, 1);
+          sctx.drawImage(camVideo, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, 240, 240);
+          avatar = c.toDataURL("image/jpeg", 0.82);
+          ipcRenderer.invoke("store-set", "canvasAvatar", avatar).catch(() => {});
+          if (openPicker) showPicker(openPicker);
+        }, 420);
+      }
+
+      function stopLiveCamera() {
+        if (camStream) {
+          camStream.getTracks().forEach((t) => t.stop());
+          camStream = null;
+        }
+        if (camVideo) {
+          camVideo.srcObject = null;
+          camVideo.remove();
+          camVideo = null;
+        }
+      }
+
+      function updateCamera() {
+        if (camOn && !recording) void startLiveCamera();
+        else stopLiveCamera();
+      }
+
+      // ---- preview tiles --------------------------------------------------
+
+      function buildTile(tileScene, opts) {
+        const tile = document.createElement("button");
+        tile.type = "button";
+        tile.className = "tile" + (opts.selected ? " selected" : "");
+        const W = 320, H = 180;
+        const cv = document.createElement("canvas");
+        cv.width = W * 2; cv.height = H * 2;
+        const ctx = cv.getContext("2d");
+        if (opts.neutral) {
+          ctx.fillStyle = "#f3efe7"; ctx.fillRect(0, 0, cv.width, cv.height);
+        } else {
+          painterFor(tileScene.background)(ctx, cv.width, cv.height);
+        }
+        tile.appendChild(cv);
+
+        const ink = opts.neutral ? "#2c2a3a" : SCENE.canvasInkColor(tileScene.background);
+        for (const slot of SCENE.CANVAS_LAYOUTS[tileScene.layout] || []) {
+          const text = opts.usePlaceholders ? slot.placeholder : (tileScene.texts[slot.key] || "");
+          if (!text && !opts.usePlaceholders) continue;
+          const s = document.createElement("div");
+          s.className = "t-slot";
+          s.style.left = slot.x * 100 + "%";
+          s.style.top = slot.y * 100 + "%";
+          s.style.width = slot.w * 100 + "%";
+          s.style.fontSize = slot.size * W + "px";
+          s.style.fontWeight = String(slot.weight);
+          s.style.lineHeight = String(slot.lineHeight);
+          s.style.color = ink;
+          if (slot.bullet) {
+            const b = document.createElement("span");
+            b.className = "t-bullet"; b.style.background = ink;
+            s.appendChild(b);
+          }
+          const t = document.createElement("div");
+          t.className = "t-text"; t.style.textAlign = slot.align; t.textContent = text;
+          s.appendChild(t);
+          tile.appendChild(s);
+        }
+
+        const bub = document.createElement("div");
+        bub.className = "t-bubble";
+        if (avatar) {
+          bub.style.backgroundImage = `url("${avatar}")`;
+          bub.style.backgroundSize = "cover";
+          bub.style.backgroundPosition = "center";
+        }
+        if (opts.centered) {
+          const d = Math.round(H * 0.42);
+          bub.style.width = bub.style.height = d + "px";
+          bub.style.left = Math.round(W / 2 - d / 2) + "px";
+          bub.style.top = Math.round(H / 2 - d / 2) + "px";
+        } else {
+          const d = Math.round(H * 0.2);
+          bub.style.width = bub.style.height = d + "px";
+          bub.style.left = Math.round(W * 0.06) + "px";
+          bub.style.top = Math.round(H - d - H * 0.08) + "px";
+        }
+        tile.appendChild(bub);
+        tile.addEventListener("click", opts.onClick);
+        return tile;
+      }
+
+      function tileGrid(children) {
+        const grid = document.createElement("div");
+        grid.className = "grid";
+        for (const c of children) grid.appendChild(c);
+        return grid;
+      }
+
+      function showPicker(kind) {
+        openPicker = kind;
+        document.querySelectorAll(".composetab").forEach((t) =>
+          t.classList.toggle("active", t.dataset.pick === kind));
+        pickerBody.innerHTML = "";
+
+        if (kind === "templates") {
+          pickerTitle.textContent = "Templates";
+          const tiles = SCENE.CANVAS_TEMPLATES.filter((t) => t.preset).map((t) => {
+            const sc = SCENE.applyCanvasTemplate(scene, t);
+            return buildTile(sc, {
+              selected: scene.template === t.id,
+              centered: t.id === "bubble",
+              onClick: () => { scene = SCENE.applyCanvasTemplate(scene, t); afterPick(); },
+            });
+          });
+          pickerBody.appendChild(tileGrid(tiles));
+        } else if (kind === "layout") {
+          pickerTitle.textContent = "Text layout";
+          // Self-contained: each tile previews ONLY its layout (neutral page,
+          // placeholder copy) — unaffected by the chosen template/background.
+          const tiles = SCENE.CANVAS_LAYOUT_PRESETS.map((preset) =>
+            buildTile({ background: "gradient", layout: preset.id, texts: {} }, {
+              neutral: true,
+              usePlaceholders: true,
+              selected: scene.layout === preset.id,
+              onClick: () => { scene.layout = preset.id; scene.template = "none"; afterPick(); },
+            }));
+          pickerBody.appendChild(tileGrid(tiles));
+        } else {
+          pickerTitle.textContent = "Background";
+          // Self-contained: each tile previews ONLY its background + your camera
+          // — no text, so picking a template/layout doesn't change them.
+          const tiles = SCENE.CANVAS_BACKGROUND_PRESETS.map((preset) =>
+            buildTile({ background: preset.id, layout: "empty", texts: {} }, {
+              selected: scene.background === preset.id,
+              onClick: () => { scene.background = preset.id; scene.template = "none"; afterPick(); },
+            }));
+          pickerBody.appendChild(tileGrid(tiles));
+        }
+        pickerEl.classList.add("open");
+      }
+
+      function hidePicker() {
+        openPicker = null;
+        pickerEl.classList.remove("open");
+        document.querySelectorAll(".composetab").forEach((t) => t.classList.remove("active"));
+      }
+
+      function afterPick() {
+        hidePicker();
+        render();
+        persist();
+      }
+
+      // ---- recording handoff ----------------------------------------------
+
+      function enterRecordingMode() {
+        recording = true;
+        hidePicker();
+        // Release the camera so the real recording bubble window can take it.
+        stopLiveCamera();
+        document.body.classList.add("recording");
+        slotsEl.querySelectorAll(".editor").forEach((e) => { e.setAttribute("contenteditable", "false"); e.blur(); });
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      }
+      function exitRecordingMode() {
+        recording = false;
+        document.body.classList.remove("recording");
+        slotsEl.querySelectorAll(".editor").forEach((e) => e.setAttribute("contenteditable", "true"));
+        updateCamera();
+        placeBubble();
+      }
+
+      function startRecording() {
+        if (recording) return;
+        enterRecordingMode();
+        ipcRenderer.invoke("canvas-request-record", { scene, camOn, countdownOn }).catch(() => {});
+      }
+      function closeStage() {
+        if (recording) return;
+        ipcRenderer.invoke("canvas-close").catch(() => {});
+      }
+
+      // ---- wiring ----------------------------------------------------------
+
+      document.querySelectorAll(".composetab").forEach((tab) =>
+        tab.addEventListener("click", () => {
+          const kind = tab.dataset.pick;
+          if (openPicker === kind) hidePicker();
+          else showPicker(kind);
+        }));
+      document.getElementById("picker-scrim").addEventListener("click", hidePicker);
+      document.getElementById("picker-close").addEventListener("click", hidePicker);
+      document.getElementById("btn-start").addEventListener("click", startRecording);
+      document.getElementById("btn-close").addEventListener("click", closeStage);
+
+      function syncToggles() {
+        camPill.classList.toggle("on", camOn);
+        countdownPill.classList.toggle("on", countdownOn);
+      }
+      camPill.addEventListener("click", () => {
+        camOn = !camOn;
+        syncToggles();
+        updateCamera();
+        placeBubble();
+        if (openPicker) showPicker(openPicker); // refresh tiles' bubble
+      });
+      countdownPill.addEventListener("click", () => { countdownOn = !countdownOn; syncToggles(); });
+
+      ipcRenderer.on("canvas-restore-compose", () => exitRecordingMode());
+      ipcRenderer.on("canvas-set-recording", () => enterRecordingMode());
+
+      window.addEventListener("resize", () => { paintBackdrop(); placeBubble(); });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        if (openPicker) hidePicker();
+        else if (!recording) closeStage();
+      });
+
+      (async () => {
+        try {
+          const stored = await ipcRenderer.invoke("store-get", "canvasScene");
+          if (stored && typeof stored === "object" && stored.background) {
+            scene = { ...DEFAULT_START, ...stored, enabled: true, texts: stored.texts && typeof stored.texts === "object" ? stored.texts : {} };
+          }
+        } catch { /* first run */ }
+        try {
+          avatar = (await ipcRenderer.invoke("store-get", "canvasAvatar")) || null;
+        } catch { /* none yet */ }
+        syncToggles();
+        render();
+        updateCamera(); // bring the live self-view up
+      })();
+    </script>
+  </body>
+</html>

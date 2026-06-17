@@ -37,6 +37,9 @@ let bubbleWindow = null;
 let controlsWindow = null;
 let countdownWindow = null;
 let notesWindow = null;
+/** Full-screen Loom-style canvas stage (a real backdrop window we record). */
+let canvasWindow = null;
+let canvasDisplayId = null;
 /** Full-display "drag a rectangle" overlays (custom-size capture). */
 let regionWindows = [];
 let regionResolve = null;
@@ -691,6 +694,72 @@ function closeNotes() {
 }
 
 // ---------------------------------------------------------------------------
+// Canvas stage — a real full-display backdrop window (Loom-style). Unlike the
+// control bar / countdown it is deliberately NOT content-protected: it IS the
+// designed backdrop we want in the recording, captured live like any on-screen
+// window, with the camera bubble floating on top. The compose toolbar inside it
+// hides itself before the take so it's never recorded.
+// ---------------------------------------------------------------------------
+
+function openCanvasWindow(displayId, camOn, countdownOn, camDeviceId) {
+  closeCanvasWindow();
+  const display = displayForId(displayId);
+  canvasDisplayId = String(display.id);
+
+  canvasWindow = new BrowserWindow({
+    ...display.bounds,
+    frame: false,
+    transparent: false,
+    backgroundColor: "#17151f",
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    enableLargerThanScreen: true,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+    },
+  });
+  // "floating" sits above normal windows so the screen capture includes it; the
+  // camera bubble (also "floating", opened at record time) lands on top of it.
+  canvasWindow.setAlwaysOnTop(true, "floating");
+  canvasWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  canvasWindow.setBounds(display.bounds); // transparent/opaque windows can shrink on create
+  canvasWindow.loadFile(path.join(__dirname, "renderer", "canvas.html"), {
+    query: {
+      camOn: camOn ? "1" : "0",
+      countdownOn: countdownOn === false ? "0" : "1",
+      camDeviceId: typeof camDeviceId === "string" ? camDeviceId : "",
+    },
+  });
+  canvasWindow.once("ready-to-show", () => {
+    if (canvasWindow && !canvasWindow.isDestroyed()) canvasWindow.focus();
+  });
+  canvasWindow.on("closed", () => {
+    canvasWindow = null;
+  });
+}
+
+function closeCanvasWindow() {
+  if (canvasWindow && !canvasWindow.isDestroyed()) {
+    canvasWindow.destroy();
+  }
+  canvasWindow = null;
+}
+
+function canvasStageSend(channel, ...args) {
+  if (canvasWindow && !canvasWindow.isDestroyed()) {
+    canvasWindow.webContents.send(channel, ...args);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tray
 // ---------------------------------------------------------------------------
 
@@ -1055,6 +1124,55 @@ function registerIpc() {
 
   ipcMain.handle("main-show", () => {
     showMainWindow();
+    return true;
+  });
+
+  // --- Canvas stage ----------------------------------------------------------
+
+  ipcMain.handle("canvas-open", (_event, payload) => {
+    openCanvasWindow(
+      payload && payload.displayId,
+      Boolean(payload && payload.camOn),
+      !(payload && payload.countdownOn === false),
+      (payload && payload.camDeviceId) || "",
+    );
+    return canvasDisplayId;
+  });
+
+  // "Start recording" from inside the canvas stage → hand off to the hub's
+  // capture pipeline, recording the very display the stage covers.
+  ipcMain.handle("canvas-request-record", (event, payload) => {
+    const fromCanvas =
+      canvasWindow &&
+      !canvasWindow.isDestroyed() &&
+      event.sender === canvasWindow.webContents;
+    if (!fromCanvas) return false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("start-canvas-recording", {
+        displayId: canvasDisplayId,
+        camOn: Boolean(payload && payload.camOn),
+        countdownOn: !(payload && payload.countdownOn === false),
+      });
+    }
+    return true;
+  });
+
+  // Hub → canvas stage: hide the compose toolbar right before capture, or bring
+  // it back when a take is aborted.
+  ipcMain.handle("canvas-set-recording", () => {
+    canvasStageSend("canvas-set-recording", true);
+    return true;
+  });
+  ipcMain.handle("canvas-restore-compose", () => {
+    canvasStageSend("canvas-restore-compose");
+    return true;
+  });
+
+  ipcMain.handle("canvas-close", () => {
+    closeCanvasWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("canvas-closed");
+    }
     return true;
   });
 }

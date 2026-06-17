@@ -610,7 +610,8 @@ export function RecorderApp() {
       // include this page (this tab, this browser window, or a monitor
       // showing it), the in-page bubble is already IN the recording —
       // compositing a second one onto the canvas would double it. Probed
-      // before any frame is recorded, so the sentinel flash never shows.
+      // before any frame is recorded (so it never reaches the file) behind an
+      // on-brand "Preparing your recording…" splash, never a bare color flash.
       let burned = false;
       if (settings.mode === "screen_camera" && engine.screenCaptureStream) {
         burned = await probePageInStream(engine.screenCaptureStream);
@@ -1082,50 +1083,78 @@ export function RecorderApp() {
           stageShown ? "pointer-events-none" : ""
         }`}
       >
-        {(phase === "setup" || phase === "starting") && (
-          <div className="pointer-events-auto mx-auto w-full max-w-xl space-y-5">
-            <div className="space-y-1.5 text-center">
-              <h1 className="text-2xl font-bold tracking-tight">New recording</h1>
-              <p className="text-sm text-muted-foreground">
-                Capture your screen, camera or both — then share it with a link in seconds.
-              </p>
-            </div>
-
-            {noWorkspace && (
-              <div className="rounded-xl border border-border bg-card/60 p-4 text-sm text-muted-foreground">
-                You&apos;re not a member of any workspace yet.{" "}
-                <Link href="/app" className="font-medium text-primary hover:underline">
-                  Head to the app
-                </Link>{" "}
-                to create one, then come back to record.
+        {(phase === "setup" || phase === "starting") &&
+          // With a canvas active, the stage IS the page: dock the controls into
+          // a compact glassy card floating at the bottom so the full-screen
+          // stage stays the foreground you edit, not a backdrop buried under a
+          // big setup panel. Otherwise, the normal centered setup column.
+          (stageShown ? (
+            <div className="pointer-events-none mt-auto flex w-full justify-center">
+              <div className="pointer-events-auto w-full max-w-md rounded-2xl border border-border bg-background/80 p-4 shadow-2xl backdrop-blur-xl">
+                <p className="mb-3 text-center text-sm font-medium text-foreground">
+                  Your canvas stage is live — click any text on it to edit, then
+                  start recording.
+                </p>
+                <SetupPanel
+                  settings={settings}
+                  onChange={handleSettingsChange}
+                  plan={plan}
+                  workspaceId={workspaceId}
+                  starting={phase === "starting"}
+                  notesOpen={notesOpen}
+                  desktopAppDetected={desktopAppDetected}
+                  preferDesktopApp={preferDesktopApp}
+                  onPreferDesktopAppChange={handlePreferDesktopApp}
+                  onOpenEffects={() => setEffectsOpen(true)}
+                  onToggleNotes={() => setNotesOpen((open) => !open)}
+                  onStart={() => void startRecording()}
+                />
               </div>
-            )}
+            </div>
+          ) : (
+            <div className="pointer-events-auto mx-auto w-full max-w-xl space-y-5">
+              <div className="space-y-1.5 text-center">
+                <h1 className="text-2xl font-bold tracking-tight">New recording</h1>
+                <p className="text-sm text-muted-foreground">
+                  Capture your screen, camera or both — then share it with a link in seconds.
+                </p>
+              </div>
 
-            <RecoveryBanner
-              sessions={recoverySessions}
-              busy={recoveryBusy}
-              onResume={(rec) => void resumeRecovered(rec)}
-              onDiscard={(rec) => void discardRecovered(rec)}
-            />
+              {noWorkspace && (
+                <div className="rounded-xl border border-border bg-card/60 p-4 text-sm text-muted-foreground">
+                  You&apos;re not a member of any workspace yet.{" "}
+                  <Link href="/app" className="font-medium text-primary hover:underline">
+                    Head to the app
+                  </Link>{" "}
+                  to create one, then come back to record.
+                </div>
+              )}
 
-            <SetupPanel
-              settings={settings}
-              onChange={handleSettingsChange}
-              plan={plan}
-              workspaceId={workspaceId}
-              starting={phase === "starting"}
-              notesOpen={notesOpen}
-              desktopAppDetected={desktopAppDetected}
-              preferDesktopApp={preferDesktopApp}
-              onPreferDesktopAppChange={handlePreferDesktopApp}
-              onOpenEffects={() => setEffectsOpen(true)}
-              onToggleNotes={() => setNotesOpen((open) => !open)}
-              onStart={() => void startRecording()}
-            />
+              <RecoveryBanner
+                sessions={recoverySessions}
+                busy={recoveryBusy}
+                onResume={(rec) => void resumeRecovered(rec)}
+                onDiscard={(rec) => void discardRecovered(rec)}
+              />
 
-            <UploadFileCard busy={fileBusy} onPickFile={(file) => void handlePickFile(file)} />
-          </div>
-        )}
+              <SetupPanel
+                settings={settings}
+                onChange={handleSettingsChange}
+                plan={plan}
+                workspaceId={workspaceId}
+                starting={phase === "starting"}
+                notesOpen={notesOpen}
+                desktopAppDetected={desktopAppDetected}
+                preferDesktopApp={preferDesktopApp}
+                onPreferDesktopAppChange={handlePreferDesktopApp}
+                onOpenEffects={() => setEffectsOpen(true)}
+                onToggleNotes={() => setNotesOpen((open) => !open)}
+                onStart={() => void startRecording()}
+              />
+
+              <UploadFileCard busy={fileBusy} onPickFile={(file) => void handlePickFile(file)} />
+            </div>
+          ))}
 
         {isCapturePhase && (
           <div className="pointer-events-auto flex flex-1 flex-col items-center justify-center gap-6 text-center">

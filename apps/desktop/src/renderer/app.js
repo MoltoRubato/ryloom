@@ -15,6 +15,7 @@ const { ipcRenderer } = require("electron");
 const { createClient } = require("@supabase/supabase-js");
 const { createTRPCClient, httpBatchLink } = require("@trpc/client");
 const { Recorder } = require("./recorder.js");
+const CANVAS = require("./canvas-scene.js");
 
 // superjson 2.x is ESM-only; fall back to a wire-compatible CJS shim.
 let transformer;
@@ -87,6 +88,12 @@ const state = {
   starting: false,
   stopping: false,
   restarting: false,
+  // A Loom-style canvas stage is the backdrop for the in-flight recording.
+  canvasActive: false,
+  // Canvas scene + a camera snapshot used for the inline Effects → Canvas
+  // previews (shared with the stage window via the settings store).
+  canvasScene: null,
+  cameraAvatar: null,
 };
 
 // Effects presets. Background ids must match recorder.js BACKGROUND_PAINTERS;
@@ -1053,7 +1060,8 @@ async function beginCapture(plan) {
       micEnabled: Boolean(state.prefs.micOn),
       micDeviceId: state.prefs.micDeviceId || $("mic-select").value || null,
       effects: {
-        background: state.prefs.effects.background,
+        // The canvas stage IS the backdrop — never also inset onto a wallpaper.
+        background: state.canvasActive ? "none" : state.prefs.effects.background,
         padding: state.prefs.effects.padding,
         corners: state.prefs.effects.corners,
       },
@@ -1139,6 +1147,7 @@ async function stopRecordingFlow() {
     await invoke("set-recording", false);
     await invoke("controls-close");
     await invoke("bubble-close");
+    await closeCanvasIfActive();
 
     const shareUrl = `${state.appUrl}/share/${state.active.shareToken}`;
 
@@ -1183,6 +1192,8 @@ async function cancelRecordingFlow(fromControls = false) {
   state.recorder = null;
   await invoke("set-recording", false);
   await invoke("controls-close");
+  await invoke("bubble-close");
+  await closeCanvasIfActive();
   await safeCancelSession();
   setView("home");
   await invoke("main-show");
@@ -1211,6 +1222,8 @@ async function restartRecordingFlow() {
       if (!completed) {
         // Canceling the restart countdown discards the take entirely.
         await invoke("set-recording", false);
+        await invoke("bubble-close");
+        await closeCanvasIfActive();
         await safeCancelSession();
         setView("home");
         await invoke("main-show");
@@ -1242,6 +1255,378 @@ async function safeCancelSession() {
     /* best effort */
   }
   state.active = null;
+}
+
+// ---------------------------------------------------------------------------
+// Canvas stage (Loom-style backdrop window)
+// ---------------------------------------------------------------------------
+
+/** Opens the full-screen canvas stage from the hub. Editing/recording happens
+ *  inside the stage window; the hub just launches it. */
+async function openCanvas() {
+  if (!state.session) {
+    toast("Sign in first", "error");
+    return;
+  }
+  if (!state.workspaceId) {
+    await enterHome();
+    if (!state.workspaceId) return;
+  }
+  // Drop any stale home bubble so it never lingers behind the stage; the
+  // canvas's own camera toggle brings it back (on top) at record time.
+  await invoke("bubble-close");
+  await invoke("canvas-open", {
+    camOn: state.prefs.camOn,
+    countdownOn: state.prefs.countdownOn,
+    camDeviceId: state.prefs.camDeviceId || $("cam-select").value || "",
+  });
+}
+
+// --- Effects → Canvas tab (inline visual option grids) ----------------------
+
+const DEFAULT_CANVAS_SCENE = () => ({
+  enabled: true,
+  template: "none",
+  background: "gradient",
+  layout: "centered",
+  texts: {},
+});
+
+/** Grabs a square snapshot of the camera so canvas previews show the real you,
+ *  not a placeholder. Stored so the stage window reuses the same frame. */
+function cropSquareDataUrl(video) {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const side = Math.min(vw, vh);
+  const c = document.createElement("canvas");
+  c.width = 240;
+  c.height = 240;
+  const ctx = c.getContext("2d");
+  ctx.translate(240, 0); // mirror to match the selfie-mirrored recording bubble
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, 240, 240);
+  return c.toDataURL("image/jpeg", 0.82);
+}
+
+async function refreshCameraAvatar() {
+  if (!state.prefs.camOn) return;
+  let stream = null;
+  try {
+    const deviceId = state.prefs.camDeviceId || $("cam-select").value || null;
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : true,
+    });
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+    const url = cropSquareDataUrl(video);
+    state.cameraAvatar = url;
+    invoke("store-set", "canvasAvatar", url).catch(() => {});
+  } catch {
+    /* keep whatever avatar we already had */
+  } finally {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+  }
+}
+
+async function loadCanvasScene() {
+  try {
+    const stored = await invoke("store-get", "canvasScene");
+    state.canvasScene =
+      stored && stored.background
+        ? { ...DEFAULT_CANVAS_SCENE(), ...stored, enabled: true, texts: stored.texts || {} }
+        : DEFAULT_CANVAS_SCENE();
+  } catch {
+    state.canvasScene = DEFAULT_CANVAS_SCENE();
+  }
+  if (state.cameraAvatar == null) {
+    try {
+      state.cameraAvatar = (await invoke("store-get", "canvasAvatar")) || null;
+    } catch {
+      /* none yet */
+    }
+  }
+}
+
+function persistCanvasScene() {
+  if (!state.canvasScene) return;
+  state.canvasScene.enabled = true;
+  invoke("store-set", "canvasScene", state.canvasScene).catch(() => {});
+}
+
+/** A mini live-rendered preview of a canvas scene (background + text + your
+ *  camera avatar), used as a clickable tile in the Effects → Canvas grids. */
+function buildCanvasTile(tileScene, opts) {
+  const tile = document.createElement("button");
+  tile.type = "button";
+  tile.className = "canvas-tile" + (opts.selected ? " selected" : "");
+  const W = 200, H = 112;
+  const cv = document.createElement("canvas");
+  cv.width = W * 2;
+  cv.height = H * 2;
+  const ctx = cv.getContext("2d");
+  if (opts.neutral) {
+    ctx.fillStyle = "#f3efe7";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  } else {
+    (CANVAS.CANVAS_BACKGROUND_PAINTERS[tileScene.background] ||
+      CANVAS.CANVAS_BACKGROUND_PAINTERS.gradient)(ctx, cv.width, cv.height);
+  }
+  tile.appendChild(cv);
+
+  const ink = opts.neutral ? "#2c2a3a" : CANVAS.canvasInkColor(tileScene.background);
+  for (const slot of CANVAS.CANVAS_LAYOUTS[tileScene.layout] || []) {
+    const text = opts.usePlaceholders ? slot.placeholder : tileScene.texts[slot.key] || "";
+    if (!text && !opts.usePlaceholders) continue;
+    const s = document.createElement("div");
+    s.className = "ct-slot";
+    s.style.left = slot.x * 100 + "%";
+    s.style.top = slot.y * 100 + "%";
+    s.style.width = slot.w * 100 + "%";
+    s.style.fontSize = slot.size * W + "px";
+    s.style.fontWeight = String(slot.weight);
+    s.style.lineHeight = String(slot.lineHeight);
+    s.style.color = ink;
+    if (slot.bullet) {
+      const b = document.createElement("span");
+      b.className = "ct-bullet";
+      b.style.background = ink;
+      s.appendChild(b);
+    }
+    const t = document.createElement("div");
+    t.className = "ct-text";
+    t.style.textAlign = slot.align;
+    t.textContent = text;
+    s.appendChild(t);
+    tile.appendChild(s);
+  }
+
+  if (state.prefs.camOn) {
+    const bub = document.createElement("div");
+    bub.className = "ct-bubble";
+    if (opts.centered) {
+      const d = Math.round(H * 0.42);
+      bub.style.width = bub.style.height = d + "px";
+      bub.style.left = Math.round(W / 2 - d / 2) + "px";
+      bub.style.top = Math.round(H / 2 - d / 2) + "px";
+    } else {
+      const d = Math.round(H * 0.22);
+      bub.style.width = bub.style.height = d + "px";
+      bub.style.left = Math.round(W * 0.06) + "px";
+      bub.style.top = Math.round(H - d - H * 0.08) + "px";
+    }
+    if (state.cameraAvatar) {
+      bub.style.backgroundImage = `url("${state.cameraAvatar}")`;
+      bub.classList.add("has-photo");
+    }
+    tile.appendChild(bub);
+  }
+
+  tile.addEventListener("click", opts.onClick);
+  return tile;
+}
+
+function renderCanvasEffectsGrids() {
+  const sc = state.canvasScene;
+  if (!sc) return;
+
+  const tg = $("canvas-templates-grid");
+  tg.innerHTML = "";
+  for (const t of CANVAS.CANVAS_TEMPLATES.filter((x) => x.preset)) {
+    tg.appendChild(
+      buildCanvasTile(CANVAS.applyCanvasTemplate(sc, t), {
+        selected: sc.template === t.id,
+        centered: t.id === "bubble",
+        onClick: () => {
+          state.canvasScene = CANVAS.applyCanvasTemplate(state.canvasScene, t);
+          persistCanvasScene();
+          renderCanvasEffectsGrids();
+        },
+      }),
+    );
+  }
+
+  // Each background tile previews ONLY its background + your camera (no text),
+  // so picking a template/layout never changes these tiles.
+  const bgGrid = $("canvas-bg-grid");
+  bgGrid.innerHTML = "";
+  for (const p of CANVAS.CANVAS_BACKGROUND_PRESETS) {
+    bgGrid.appendChild(
+      buildCanvasTile({ background: p.id, layout: "empty", texts: {} }, {
+        selected: sc.background === p.id,
+        onClick: () => {
+          state.canvasScene = { ...state.canvasScene, enabled: true, background: p.id, template: "none" };
+          persistCanvasScene();
+          renderCanvasEffectsGrids();
+        },
+      }),
+    );
+  }
+
+  // Each layout tile previews ONLY its layout on a neutral page — self-contained.
+  const lg = $("canvas-layout-grid");
+  lg.innerHTML = "";
+  for (const p of CANVAS.CANVAS_LAYOUT_PRESETS) {
+    lg.appendChild(
+      buildCanvasTile({ background: "gradient", layout: p.id, texts: {} }, {
+        neutral: true,
+        usePlaceholders: true,
+        selected: sc.layout === p.id,
+        onClick: () => {
+          state.canvasScene = { ...state.canvasScene, enabled: true, layout: p.id, template: "none" };
+          persistCanvasScene();
+          renderCanvasEffectsGrids();
+        },
+      }),
+    );
+  }
+}
+
+async function refreshCanvasEffectsTab() {
+  await loadCanvasScene();
+  renderCanvasEffectsGrids();
+}
+
+/** Closes the canvas stage window if it's backing the current recording. */
+async function closeCanvasIfActive() {
+  if (!state.canvasActive) return;
+  state.canvasActive = false;
+  await invoke("canvas-close");
+}
+
+/**
+ * "Start recording" came from inside the canvas stage. Records the very display
+ * the stage covers (so the stage + floating camera bubble ARE the video),
+ * reusing the normal capture pipeline.
+ */
+async function startCanvasRecording(opts) {
+  if (state.starting || state.view === "recording" || state.view === "countdown") return;
+  if (!state.session || !state.workspaceId) {
+    toast("Sign in first", "error");
+    return;
+  }
+
+  state.starting = true;
+  state.canvasActive = true;
+  // The stage's toolbar owns these toggles — mirror them into prefs so the
+  // bubble/mode/countdown all line up.
+  state.prefs.camOn = Boolean(opts && opts.camOn);
+  state.prefs.countdownOn = !(opts && opts.countdownOn === false);
+
+  const restoreCompose = async (message) => {
+    state.canvasActive = false;
+    await safeCancelSession();
+    await invoke("canvas-restore-compose");
+    if (message) toast(message, "error");
+  };
+
+  try {
+    const status = await invoke("media-status");
+    if (status.screen === "denied" || status.screen === "restricted") {
+      state.canvasActive = false;
+      await safeCancelSession();
+      await invoke("canvas-close");
+      await invoke("main-show");
+      showPermissionCard("screen");
+      return;
+    }
+    if (state.prefs.camOn) {
+      const camOk = await invoke("media-request", "camera");
+      if (!camOk) {
+        await restoreCompose("Camera permission needed — enable it in System Settings.");
+        return;
+      }
+    }
+    if (state.prefs.micOn) {
+      const micOk = await invoke("media-request", "microphone");
+      if (!micOk) {
+        await restoreCompose("Microphone permission needed — enable it in System Settings.");
+        return;
+      }
+    }
+
+    const mimeType = Recorder.pickMimeType();
+    let created;
+    try {
+      created = await getTrpc().recording.createSession.mutate({
+        workspaceId: state.workspaceId,
+        mode: state.prefs.camOn ? "screen_camera" : "screen",
+        mimeType,
+      });
+    } catch (err) {
+      await restoreCompose(errorMessage(err, "Couldn't start a recording session."));
+      return;
+    }
+    state.active = { ...created, mimeType };
+    state.blob = null;
+    state.uploadDone = false;
+
+    const screenSource = await findScreenSource(opts && opts.displayId);
+    if (!screenSource) {
+      await restoreCompose("Couldn't find the display to record. Try again.");
+      return;
+    }
+    state.source = screenSource;
+    state.plan = {
+      sourceId: screenSource.id,
+      captureSize: screenSource.captureSize || null,
+      displayId: screenSource.displayId,
+      crop: null,
+      label: "Recording canvas",
+    };
+
+    // Open the camera bubble AFTER the stage exists so it floats on top of it.
+    if (state.prefs.camOn) {
+      await invoke("bubble-open", {
+        deviceId: state.prefs.camDeviceId || $("cam-select").value || "",
+        size: state.prefs.bubbleSize,
+        frame: state.prefs.effects.frame || "circle",
+        cameraBg: state.prefs.effects.cameraBackground || "none",
+      });
+      // The bubble opens on the primary display — pull it onto the canvas's
+      // display so it actually floats over the stage on multi-monitor setups.
+      if (screenSource.displayBounds) {
+        await invoke("bubble-move-into", screenSource.displayBounds);
+      }
+    } else {
+      await invoke("bubble-close");
+    }
+
+    await invoke("main-hide");
+
+    if (state.prefs.countdownOn) {
+      const completed = await invoke("countdown-run", {
+        displayId: state.plan.displayId || null,
+      });
+      if (!completed) {
+        await safeCancelSession();
+        await invoke("bubble-close");
+        await invoke("canvas-restore-compose");
+        state.canvasActive = false;
+        await invoke("main-show");
+        return;
+      }
+    }
+
+    // Clear the stage's compose toolbar so it never lands in the first frame.
+    await invoke("canvas-set-recording");
+    await new Promise((resolve) => setTimeout(resolve, 90));
+
+    const started = await beginCapture(state.plan);
+    if (!started) {
+      // beginCapture already restored the hub on failure.
+      state.canvasActive = false;
+      await invoke("canvas-restore-compose");
+    }
+  } catch (err) {
+    await restoreCompose(errorMessage(err, "Couldn't start the canvas recording."));
+    await invoke("main-show");
+  } finally {
+    state.starting = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,6 +1872,8 @@ function openEffects() {
   renderSegRow("padding-row", "padding");
   renderSegRow("corners-row", "corners");
   $("effects-overlay").hidden = false;
+  // Populate the inline Canvas option grids (async — store-backed scene).
+  void refreshCanvasEffectsTab();
 }
 
 function updateEffectsDot() {
@@ -1656,6 +2043,20 @@ function wireEvents() {
   });
   $("btn-record").addEventListener("click", startRecordingFlow);
   $("btn-effects").addEventListener("click", openEffects);
+  $("btn-open-canvas").addEventListener("click", async () => {
+    $("effects-overlay").hidden = true;
+    // Flush the picked scene so the stage window loads exactly what's shown.
+    if (state.canvasScene) {
+      try {
+        await invoke("store-set", "canvasScene", state.canvasScene);
+      } catch {
+        /* the stage falls back to the last stored scene */
+      }
+    }
+    openCanvas().catch((err) =>
+      toast(`Couldn't open the canvas: ${errorMessage(err, "unknown error")}`, "error"),
+    );
+  });
   $("btn-notes").addEventListener("click", () => invoke("notes-toggle"));
 
   $("mic-toggle").addEventListener("change", async (event) => {
@@ -1694,14 +2095,20 @@ function wireEvents() {
       if (!state.prefs.camDeviceId) {
         state.prefs.camDeviceId = $("cam-select").value || null;
       }
+      // Snapshot the camera for the canvas previews while it's still free —
+      // BEFORE syncBubble() opens the bubble window and takes the device.
+      await refreshCameraAvatar();
     }
     savePrefs();
     syncBubble();
   });
-  $("cam-select").addEventListener("change", (event) => {
+  $("cam-select").addEventListener("change", async (event) => {
     state.prefs.camDeviceId = event.target.value || null;
     savePrefs();
-    if (state.prefs.camOn) syncBubble(); // reopen bubble with the new camera
+    if (state.prefs.camOn) {
+      await refreshCameraAvatar();
+      syncBubble(); // reopen bubble with the new camera
+    }
   });
 
   $("countdown-toggle").addEventListener("change", (event) => {
@@ -1781,7 +2188,7 @@ function wireEvents() {
   for (const tab of effectsTabs) {
     tab.addEventListener("click", () => {
       for (const t of effectsTabs) t.classList.toggle("active", t === tab);
-      for (const pane of ["backgrounds", "frames", "canvas"]) {
+      for (const pane of ["canvas", "backgrounds", "frames", "wallpaper"]) {
         $(`effects-pane-${pane}`).hidden = pane !== tab.dataset.tab;
       }
     });
@@ -1846,6 +2253,18 @@ function wireEvents() {
       default:
         break;
     }
+  });
+
+  // "Start recording" pressed inside the canvas stage window.
+  ipcRenderer.on("start-canvas-recording", (_event, opts) => {
+    startCanvasRecording(opts || {});
+  });
+
+  // The canvas stage was closed (its ✕ / Esc) without recording.
+  ipcRenderer.on("canvas-closed", () => {
+    if (state.view === "recording" || state.starting) return;
+    state.canvasActive = false;
+    if (state.view === "home") syncBubble();
   });
 
   // Tray → "Connection settings…"

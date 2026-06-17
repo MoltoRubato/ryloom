@@ -180,6 +180,11 @@ export function AiPanel({
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  // Only ONE workflow output is expanded at a time — the picker below swaps it,
+  // so the 10 workflow types stay a tidy grid instead of a wall of cards.
+  const [selectedWorkflow, setSelectedWorkflow] = useState<AiOutputType>(
+    WORKFLOW_TYPES[0]!.type,
+  );
 
   const renderCard = (def: AiTypeDef, locked: boolean) => {
     const output = latestByType.get(def.type);
@@ -343,7 +348,7 @@ export function AiPanel({
         </section>
 
         <section>
-          <div className="mb-3 flex items-center gap-2">
+          <div className="mb-1 flex items-center gap-2">
             <h3 className="flex items-center gap-2 text-sm font-semibold">
               <ClipboardList className="h-4 w-4 text-primary" />
               AI workflows
@@ -354,8 +359,59 @@ export function AiPanel({
               </Badge>
             )}
           </div>
-          <div className="grid gap-3 lg:grid-cols-2">
-            {WORKFLOW_TYPES.map((def) => renderCard(def, !workflowsUnlocked))}
+          <p className="mb-3 text-xs text-muted-foreground">
+            Turn this recording into a ready-to-send artifact — pick one to
+            generate.
+          </p>
+
+          {/* Compact picker: all 10 types as small chips, one result below. */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {WORKFLOW_TYPES.map((def) => {
+              const Icon = def.icon;
+              const hasOutput = latestByType.has(def.type);
+              const active = selectedWorkflow === def.type;
+              return (
+                <button
+                  key={def.type}
+                  type="button"
+                  onClick={() => setSelectedWorkflow(def.type)}
+                  aria-pressed={active}
+                  title={def.description}
+                  className={cn(
+                    "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs font-medium transition-colors",
+                    active
+                      ? "border-primary/50 bg-primary/10 text-foreground"
+                      : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  {!workflowsUnlocked ? (
+                    <Lock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <Icon
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0",
+                        active ? "text-primary" : "text-muted-foreground",
+                      )}
+                    />
+                  )}
+                  <span className="truncate">{def.label}</span>
+                  {hasOutput && (
+                    <span
+                      className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+                      title="Already generated"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-3">
+            {renderCard(
+              WORKFLOW_TYPES.find((d) => d.type === selectedWorkflow) ??
+                WORKFLOW_TYPES[0]!,
+              !workflowsUnlocked,
+            )}
           </div>
         </section>
       </div>

@@ -128,7 +128,7 @@
         </button>
 
         <div class="feature-row">
-          <button class="feature-btn" id="btn-effects" title="Backgrounds, frames & canvas">
+          <button class="feature-btn" id="btn-effects" title="Canvas, camera backgrounds, frames & wallpaper">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
             <span>Effects</span>
             <span class="feature-dot" id="effects-dot" hidden></span>
@@ -286,11 +286,29 @@
           </button>
         </div>
         <div class="effects-tabs" id="effects-tabs">
-          <button class="effects-tab active" data-tab="backgrounds">Backgrounds</button>
+          <button class="effects-tab active" data-tab="backgrounds">Camera</button>
           <button class="effects-tab" data-tab="frames">Frames</button>
+          <button class="effects-tab" data-tab="wallpaper">Wallpaper</button>
           <button class="effects-tab" data-tab="canvas">Canvas</button>
         </div>
         <div class="panel-body">
+          <div class="effects-pane" id="effects-pane-canvas" hidden>
+            <p class="effects-hint">
+              A designed full-screen backdrop with editable text to talk over —
+              your camera floats on top. Pick a starting point, then open the
+              canvas to edit the text and fine-tune.
+            </p>
+            <div class="canvas-section-title">Templates</div>
+            <div class="canvas-pick-grid" id="canvas-templates-grid"></div>
+            <div class="canvas-section-title">Backgrounds</div>
+            <div class="canvas-pick-grid" id="canvas-bg-grid"></div>
+            <div class="canvas-section-title">Text layouts</div>
+            <div class="canvas-pick-grid" id="canvas-layout-grid"></div>
+            <button class="btn btn-record" id="btn-open-canvas" style="width: 100%; margin-top: 4px">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+              Open Canvas
+            </button>
+          </div>
           <div class="effects-pane" id="effects-pane-backgrounds">
             <p class="effects-hint">
               What's behind you on camera — Clear keeps your real background,
@@ -304,10 +322,11 @@
             </p>
             <div class="option-grid" id="frame-grid"></div>
           </div>
-          <div class="effects-pane" id="effects-pane-canvas" hidden>
+          <div class="effects-pane" id="effects-pane-wallpaper" hidden>
             <p class="effects-hint">
-              Wallpaper behind your recording — your screen is inset on top of
-              it with the padding and corners below.
+              Wallpaper behind a SCREEN recording — your screen is inset on top
+              of it with the padding and corners below. (For a talking-head
+              backdrop with text, use Canvas on the home screen.)
             </p>
             <div class="swatch-grid" id="bg-grid"></div>
             <div class="seg-block">
