@@ -353,7 +353,15 @@ function openBubble(deviceId, size, frame, cameraBg, label) {
 
   // "floating" keeps the bubble above normal windows so it is naturally
   // composited into the screen capture — the classic Loom camera effect.
-  bubbleWindow.setAlwaysOnTop(true, "floating");
+  // When a canvas backdrop window is up it is ALSO "floating", so a click on
+  // the canvas could raise it over the bubble and hide the camera. Float the
+  // bubble strictly above the canvas ("pop-up-menu" 101 > "floating" 3) so it
+  // stays on top no matter what — yet still below the control bar/countdown
+  // ("screen-saver" 1000), so Stop stays clickable. macOS enforces this level
+  // order regardless of clicks.
+  const bubbleLevel =
+    canvasWindow && !canvasWindow.isDestroyed() ? "pop-up-menu" : "floating";
+  bubbleWindow.setAlwaysOnTop(true, bubbleLevel);
   bubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   bubbleWindow.loadFile(path.join(__dirname, "renderer", "bubble.html"), {
     query: {
