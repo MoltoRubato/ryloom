@@ -7,6 +7,7 @@ import {
   Check,
   ClipboardList,
   Copy,
+  FileText,
   GitPullRequest,
   Hash,
   HelpCircle,
@@ -17,6 +18,7 @@ import {
   Lock,
   Mail,
   MailCheck,
+  Megaphone,
   NotebookPen,
   Pencil,
   RefreshCw,
@@ -57,6 +59,7 @@ type AiOutputType =
   | "faq"
   | "meeting_notes"
   | "recap_email"
+  | "release_notes"
   | "doc";
 
 type AiTypeDef = {
@@ -84,6 +87,8 @@ const WORKFLOW_TYPES: AiTypeDef[] = [
   { type: "faq", label: "FAQ", description: "Questions and answers covered", icon: HelpCircle },
   { type: "meeting_notes", label: "Meeting notes", description: "Structured notes and decisions", icon: NotebookPen },
   { type: "recap_email", label: "Recap email", description: "A recap to send to attendees", icon: MailCheck },
+  { type: "release_notes", label: "Release notes", description: "Changelog-ready release notes", icon: Megaphone },
+  { type: "doc", label: "Knowledge doc", description: "A structured knowledge-base doc", icon: FileText },
 ];
 
 function extractChapters(output: WatchAiOutput): { title: string; startMs: number }[] {
@@ -181,7 +186,7 @@ export function AiPanel({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   // Only ONE workflow output is expanded at a time — the picker below swaps it,
-  // so the 10 workflow types stay a tidy grid instead of a wall of cards.
+  // so the 12 workflow types stay a tidy grid instead of a wall of cards.
   const [selectedWorkflow, setSelectedWorkflow] = useState<AiOutputType>(
     WORKFLOW_TYPES[0]!.type,
   );
@@ -364,7 +369,7 @@ export function AiPanel({
             generate.
           </p>
 
-          {/* Compact picker: all 10 types as small chips, one result below. */}
+          {/* Compact picker: all 12 types as small chips, one result below. */}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {WORKFLOW_TYPES.map((def) => {
               const Icon = def.icon;

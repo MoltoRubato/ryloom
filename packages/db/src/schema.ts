@@ -155,6 +155,7 @@ export const aiOutputTypeEnum = pgEnum("ai_output_type", [
   "faq",
   "meeting_notes",
   "recap_email",
+  "release_notes",
   "doc",
 ]);
 
