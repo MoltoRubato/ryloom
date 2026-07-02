@@ -13,7 +13,7 @@
 
 Ryloom is an internal tool: **every feature is enabled for everyone, with no
 limits and no billing.** Access is restricted to `@lyratechnologies.com.au`
-accounts (configurable via `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`).
+accounts 
 
 ## What it does
 
